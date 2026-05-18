@@ -289,9 +289,10 @@ testKeyTag = np.zeros((x_train.shape[1], x_train.shape[1]))
 for i in range(len(testKeyTag)):
     testKeyTag[i][i] = 1
 
-#get the activations of the last layer
-get_layer_output = K.function([m.model.layers[0].input],
-                                  [m.model.layers[5].output])
+# get class-head activations. Do not rely on fixed layer indexes because the
+# adversarial branch changes the model topology.
+get_layer_output = K.function([m.model.input],
+                                  [m.model.get_layer('class').output])
 
 layer_output = get_layer_output(testKeyTag)[0]
 def getMatches():
