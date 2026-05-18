@@ -49,6 +49,7 @@ OUTPUT_PATH = os.path.join(DATA_DIR, 'predicted entity matches.tsv')
 PREDICTION_THRESHOLD = config.getfloat('entity linking', 'prediction_threshold')
 PREDICT_BATCH_SIZE = config.getint('entity linking', 'predict_batch_size', fallback=1024)
 SPATIAL_FEATURES = get_spatial_features(config)
+USE_SPATIAL_INPUT = len(SPATIAL_FEATURES) > 0
 VERIFIER_SETTINGS = get_verifier_settings(config)
 
 # postGIS config
@@ -261,16 +262,20 @@ if USE_ATTENTION:
 
     tags = data['tags'].astype(str)
     properties = data['properties'].astype(str)
-    x_spatial = build_spatial_matrix(data, SPATIAL_FEATURES)
     spatial_scaler_path = os.path.join(DATA_DIR, SPATIAL_SCALER_FILENAME)
-    if os.path.exists(spatial_scaler_path):
-        print('-loading spatial scaler')
-        print(f'-from: {spatial_scaler_path}')
-        with open(spatial_scaler_path, 'rb') as file:
-            spatial_scaler = pickle.load(file)
-        x_spatial = transform_spatial_matrix(x_spatial, spatial_scaler)
+    if USE_SPATIAL_INPUT:
+        x_spatial = build_spatial_matrix(data, SPATIAL_FEATURES)
+        if os.path.exists(spatial_scaler_path):
+            print('-loading spatial scaler')
+            print(f'-from: {spatial_scaler_path}')
+            with open(spatial_scaler_path, 'rb') as file:
+                spatial_scaler = pickle.load(file)
+            x_spatial = transform_spatial_matrix(x_spatial, spatial_scaler)
+        else:
+            print('-spatial scaler not found; using raw spatial features')
     else:
-        print('-spatial scaler not found; using raw spatial features')
+        x_spatial = None
+        print('-spatial features disabled for this variant')
 
     text_sequences_osm = osm_tokenizer.texts_to_sequences(list(tags.values))
     text_sequences_osm = tf.keras.preprocessing.sequence.pad_sequences(text_sequences_osm, maxlen=nWords, padding='post')
@@ -281,7 +286,10 @@ if USE_ATTENTION:
     x_wiki = np.array(text_sequences_wiki)
 
     print(f'-predicting matches with threshold: {PREDICTION_THRESHOLD}')
-    probabilities = model.predict([x_osm, x_wiki, x_spatial], batch_size=PREDICT_BATCH_SIZE)
+    predict_inputs = [x_osm, x_wiki]
+    if USE_SPATIAL_INPUT:
+        predict_inputs.append(x_spatial)
+    probabilities = model.predict(predict_inputs, batch_size=PREDICT_BATCH_SIZE)
     # Flatten probabilities to 1D to ensure shape compatibility
     probabilities = probabilities.flatten()
     prediction = (probabilities >= PREDICTION_THRESHOLD)
@@ -360,8 +368,8 @@ write_experiment_metadata(
         **prediction_metrics_before,
         **prediction_metrics_after,
         **verifier_stats,
-        'spatial_scaler': 'standard_scaler_fit_on_train_split' if os.path.exists(os.path.join(DATA_DIR, SPATIAL_SCALER_FILENAME)) else 'raw',
-        'spatial_distance_transform': 'log1p',
+        'spatial_scaler': 'standard_scaler_fit_on_train_split' if USE_SPATIAL_INPUT and os.path.exists(os.path.join(DATA_DIR, SPATIAL_SCALER_FILENAME)) else 'none',
+        'spatial_distance_transform': 'log1p' if 'dist' in SPATIAL_FEATURES else 'none',
     },
 )
 

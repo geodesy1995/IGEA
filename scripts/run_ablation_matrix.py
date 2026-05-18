@@ -11,12 +11,11 @@ from experiment_config import SPATIAL_VARIANTS
 
 DEFAULT_VARIANTS = [
     "original",
-    "bearing",
-    "offset",
+    "distance_only",
     "all_spatial",
     "no_bearing",
     "no_offset",
-    "all_spatial_dummy_gate",
+    "no_distance",
 ]
 
 

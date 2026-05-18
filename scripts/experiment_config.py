@@ -21,12 +21,13 @@ AVAILABLE_SPATIAL_FEATURES = (
 )
 
 SPATIAL_VARIANTS: Dict[str, List[str]] = {
-    "original": ["dist"],
+    "original": [],
     "distance": ["dist"],
     "distance_only": ["dist"],
     "bearing": ["dist", "bearing_sin", "bearing_cos"],
     "offset": ["dist", "d_lat", "d_lon"],
     "all_spatial": list(AVAILABLE_SPATIAL_FEATURES),
+    "no_distance": ["bearing_sin", "bearing_cos", "d_lat", "d_lon"],
     "no_bearing": ["dist", "d_lat", "d_lon"],
     "no_offset": ["dist", "bearing_sin", "bearing_cos"],
 }
@@ -79,8 +80,6 @@ def get_spatial_features(config) -> List[str]:
             f"Invalid spatial feature(s): {', '.join(invalid)}. "
             f"Available features: {', '.join(AVAILABLE_SPATIAL_FEATURES)}"
         )
-    if not features:
-        raise ValueError("At least one spatial feature must be configured.")
     return list(features)
 
 

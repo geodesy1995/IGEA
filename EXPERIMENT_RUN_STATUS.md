@@ -140,6 +140,8 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 - Wikidata may still be limited by Wikidata Query Service rate limits, but it now has the same OSM-linked path as DBpedia.
 - The previous CPU full DBpedia ablation matrix was manually cancelled after `dbpedia_original_seed42` completed and `dbpedia_original_seed43` had started.
 - The later GPU DBpedia run under `data/ablation_dbpedia_osm_linked_gpu` used the exploratory 10 km / 200-candidate setting and was manually cancelled. Do not use it as the paper main result.
+- The later 2.5 km / max-100 GRL GPU run under `data/ablation_dbpedia_osm_linked_2500m_max100_grl_gpu` was manually cancelled because `original` still used `dist` as a model input. Treat it as diagnostic only; its `original` rows are actually distance-only.
+- The corrected main DBpedia setting defines `original` as no spatial feature concat, `distance_only` as `dist`, `all_spatial` as `dist + bearing + offset`, and leave-one-out variants `no_bearing`, `no_offset`, `no_distance`. Main reruns use seeds `42,43,44`.
 - GPU TensorFlow is available through Docker. Smoke test result: TensorFlow 2.12.0, `built_with_cuda=True`, `GPU:0` detected on RTX 4060.
 - The current `original`/`all_spatial` smoke scores are leakage-invalid. They should stay in the record only as a pipeline validation run.
 
@@ -186,7 +188,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
 Run OSM-linked DBpedia matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_original_clean_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43,44"
 ```
 
 Run OSM-linked Wikidata matrix on GPU:

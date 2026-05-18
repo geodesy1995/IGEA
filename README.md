@@ -121,13 +121,13 @@ experiment contains metadata used to name outputs in ablation runs.
 |name|Human-readable experiment name written to reports and metadata files.|
 
 ### spatial context
-spatial context controls the Urban AI extension that adds relational spatial cues to the original IGEA distance input.
+spatial context controls the Urban AI extension that adds relational spatial cues after the common distance-based candidate generation step.
 
 | option | use |
 | ------ | --- |
-|variant|Named spatial feature set. Supported values: original, bearing, offset, all_spatial, no_bearing, no_offset.|
+|variant|Named spatial feature set. Supported values: original, distance_only, bearing, offset, all_spatial, no_distance, no_bearing, no_offset.|
 |features|Explicit comma-separated feature list. If set, this overrides the named variant. Supported features: dist, bearing_sin, bearing_cos, d_lat, d_lon.|
-|encoder_units|Comma-separated Dense layer sizes for the spatial context encoder. The original IGEA baseline uses only dist and keeps the distance-scalar path.|
+|encoder_units|Comma-separated Dense layer sizes for the spatial context encoder. The original IGEA baseline uses no spatial concat; distance_only uses the distance-scalar path.|
 
 ### llm verifier
 llm verifier controls selective verification during iterative bootstrapping. The dummy provider logs low-margin cases without changing predictions. The OpenAI provider can be used as a real verifier after the main full run completes.
@@ -238,11 +238,13 @@ The original IGEA baseline is represented by:
 ```ini
 [spatial context]
 variant=original
-features=dist
+features=
 
 [llm verifier]
 enabled=False
 ```
+
+All variants still use the same 2.5 km / max-100 candidate generation policy. The `original` variant removes spatial features from the neural scorer; `distance_only` is the ablation that adds only `dist` to the neural scorer.
 
 The main abstract-aligned model is represented by:
 
@@ -424,7 +426,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
 Run the cached DBpedia matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_original_clean_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43,44"
 ```
 
 Run the cached Wikidata matrix on GPU:
@@ -451,13 +453,12 @@ Default variants:
 
 | variant | purpose |
 | ------ | --- |
-|original|Original IGEA-style distance-only baseline.|
-|bearing|Distance plus bearing_sin and bearing_cos.|
-|offset|Distance plus coordinate offsets d_lat and d_lon.|
+|original|Original IGEA-style neural scorer with no spatial feature concat; candidate generation remains 2.5 km / max 100.|
+|distance_only|Distance scalar added to the neural scorer.|
 |all_spatial|Distance, bearing_sin, bearing_cos, d_lat, and d_lon.|
 |no_bearing|Leave-one-out test removing bearing_sin and bearing_cos from all_spatial.|
 |no_offset|Leave-one-out test removing d_lat and d_lon from all_spatial.|
-|all_spatial_dummy_gate|Full spatial model with dummy selective verifier logging enabled.|
+|no_distance|Leave-one-out test removing dist from all_spatial while keeping bearing and offset.|
 |all_spatial_real_llm_gate_margin003|OpenAI verifier follow-up using all_spatial artifacts and a 0.03 low-margin gate.|
 |all_spatial_real_llm_gate_margin005|OpenAI verifier follow-up using all_spatial artifacts and a 0.05 low-margin gate.|
 |all_spatial_real_llm_gate_margin010|OpenAI verifier follow-up using all_spatial artifacts and a 0.10 low-margin gate.|

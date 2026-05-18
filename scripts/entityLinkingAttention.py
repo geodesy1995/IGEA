@@ -61,6 +61,7 @@ SPLIT_GROUP_COLUMN = config.get('entity linking', 'split_group_column', fallback
 RANDOM_SEED = config.getint('meta', 'random_seed', fallback=42)
 SPATIAL_FEATURES = get_spatial_features(config)
 SPATIAL_ENCODER_UNITS = get_spatial_encoder_units(config)
+USE_SPATIAL_INPUT = len(SPATIAL_FEATURES) > 0
 
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -68,7 +69,7 @@ tf.random.set_seed(RANDOM_SEED)
 
 print('entity linking with attention')
 print(f'-experiment: {get_experiment_name(config)}')
-print(f'-spatial features: {", ".join(SPATIAL_FEATURES)}')
+print(f'-spatial features: {", ".join(SPATIAL_FEATURES) if USE_SPATIAL_INPUT else "none"}')
 print('-loading fasttext model')
 print(f'-from: {FT_PATH}')
 
@@ -161,7 +162,7 @@ def balance(x,y):
     #y_resampled = y_resampled.toarray()
     return X_resampled, y_resampled
 
-X_spatial = build_spatial_matrix(data, SPATIAL_FEATURES)
+X_spatial = build_spatial_matrix(data, SPATIAL_FEATURES) if USE_SPATIAL_INPUT else None
 
 def make_split_indices(frame, labels, test_size, random_state, source_indices=None):
     if source_indices is None:
@@ -209,13 +210,16 @@ else:
 
 X_osm_train, X_osm_val, X_osm_test = X_osm[train_idx], X_osm[val_idx], X_osm[test_idx]
 X_wiki_train, X_wiki_val, X_wiki_test = X_wiki[train_idx], X_wiki[val_idx], X_wiki[test_idx]
-X_spatial_train, X_spatial_val, X_spatial_test = X_spatial[train_idx], X_spatial[val_idx], X_spatial[test_idx]
 y_osm_train, y_osm_val, y_osm_test = y[train_idx], y[val_idx], y[test_idx]
 
-spatial_scaler = fit_spatial_scaler(X_spatial_train)
-X_spatial_train = transform_spatial_matrix(X_spatial_train, spatial_scaler)
-X_spatial_val = transform_spatial_matrix(X_spatial_val, spatial_scaler)
-X_spatial_test = transform_spatial_matrix(X_spatial_test, spatial_scaler)
+if USE_SPATIAL_INPUT:
+    X_spatial_train, X_spatial_val, X_spatial_test = X_spatial[train_idx], X_spatial[val_idx], X_spatial[test_idx]
+    spatial_scaler = fit_spatial_scaler(X_spatial_train)
+    X_spatial_train = transform_spatial_matrix(X_spatial_train, spatial_scaler)
+    X_spatial_val = transform_spatial_matrix(X_spatial_val, spatial_scaler)
+    X_spatial_test = transform_spatial_matrix(X_spatial_test, spatial_scaler)
+else:
+    spatial_scaler = None
 
 
 # Note y_bal will be the same due to seeding
@@ -256,21 +260,27 @@ self_att2 = Concatenate()([cross_att2, self_att2])
 lstm4 = Bidirectional(LSTM(32))(self_att2)
 
 
-sentence_input_spatial = tf.keras.layers.Input(shape=(len(SPATIAL_FEATURES),), name="spatial_features")
-if SPATIAL_FEATURES == ["dist"]:
-    spatial_encoded = Dense(1, activation="relu", name="distance_scalar")(sentence_input_spatial)
-else:
-    spatial_encoded = sentence_input_spatial
-    for index, units in enumerate(SPATIAL_ENCODER_UNITS, start=1):
-        spatial_encoded = Dense(units, activation="relu", name=f"spatial_encoder_{index}")(spatial_encoded)
 # ------- combine ----------
-concat = tf.keras.layers.concatenate([lstm3, lstm4, spatial_encoded])
+model_inputs = [sentence_input, sentence_inputWiki]
+concat_inputs = [lstm3, lstm4]
+if USE_SPATIAL_INPUT:
+    sentence_input_spatial = tf.keras.layers.Input(shape=(len(SPATIAL_FEATURES),), name="spatial_features")
+    model_inputs.append(sentence_input_spatial)
+    if SPATIAL_FEATURES == ["dist"]:
+        spatial_encoded = Dense(1, activation="relu", name="distance_scalar")(sentence_input_spatial)
+    else:
+        spatial_encoded = sentence_input_spatial
+        for index, units in enumerate(SPATIAL_ENCODER_UNITS, start=1):
+            spatial_encoded = Dense(units, activation="relu", name=f"spatial_encoder_{index}")(spatial_encoded)
+    concat_inputs.append(spatial_encoded)
+
+concat = tf.keras.layers.concatenate(concat_inputs)
 
 concat = Dense(50, activation="relu")(concat)
 #dropout = Dropout(0.05)(dense1)
 output = Dense(1, activation="sigmoid")(concat)
 
-model = tf.keras.Model(inputs=[sentence_input, sentence_inputWiki, sentence_input_spatial], outputs=output)
+model = tf.keras.Model(inputs=model_inputs, outputs=output)
 
 
 def recall_m(y_true, y_pred):
@@ -311,10 +321,18 @@ if USE_CLASS_WEIGHT:
         }
         print(f'-class weights: {class_weight}')
 
+train_inputs = [X_osm_train, X_wiki_train]
+val_inputs = [X_osm_val, X_wiki_val]
+test_inputs = [X_osm_test, X_wiki_test]
+if USE_SPATIAL_INPUT:
+    train_inputs.append(X_spatial_train)
+    val_inputs.append(X_spatial_val)
+    test_inputs.append(X_spatial_test)
+
 model.fit(
-    [X_osm_train, X_wiki_train, X_spatial_train],
+    train_inputs,
     y_osm_train,
-    validation_data=([X_osm_val, X_wiki_val, X_spatial_val], y_osm_val),
+    validation_data=(val_inputs, y_osm_val),
     batch_size=BATCH_SIZE,
     epochs=NUM_EPOCHS,
     shuffle=True,
@@ -325,7 +343,7 @@ model.fit(
 
 #add confusion matrix
 
-prediction = model.predict([X_osm_test, X_wiki_test, X_spatial_test], batch_size=BATCH_SIZE)
+prediction = model.predict(test_inputs, batch_size=BATCH_SIZE)
 prediction = (prediction >= PREDICTION_THRESHOLD)
 runtime = time.time() - starttime
 
@@ -334,7 +352,7 @@ with open(os.path.join(DATA_DIR, 'class_report.txt'), 'w', encoding='utf-8') as 
     file.write(f'Performance Attention Model:\n')
     file.write(f'Experiment: {get_experiment_name(config)}\n')
     file.write(f'On Dataset: {DATASET_PATH}\n')
-    file.write(f"Spatial features: {', '.join(SPATIAL_FEATURES)}\n")
+    file.write(f"Spatial features: {', '.join(SPATIAL_FEATURES) if USE_SPATIAL_INPUT else 'none'}\n")
     file.write(f"Split strategy: {split_used}")
     if split_used == 'group':
         file.write(f" by {SPLIT_GROUP_COLUMN}")
@@ -372,12 +390,13 @@ write_experiment_metadata(
         "val_rows": int(len(val_idx)),
         "test_rows": int(len(test_idx)),
         "test_positive_support": int(np.sum(y_osm_test == 1.0)),
-        "spatial_scaler": "standard_scaler_fit_on_train_split",
-        "spatial_distance_transform": "log1p",
+        "spatial_scaler": "standard_scaler_fit_on_train_split" if USE_SPATIAL_INPUT else "none",
+        "spatial_distance_transform": "log1p" if "dist" in SPATIAL_FEATURES else "none",
     },
 )
 
 model.save(os.path.join(DATA_DIR, 'keras model'))
 save_object(tokenizer, 'osm tokenizer')
 save_object(tokenizerWiki, 'wikidata tokenizer')
-save_object(spatial_scaler, os.path.splitext(SPATIAL_SCALER_FILENAME)[0])
+if USE_SPATIAL_INPUT:
+    save_object(spatial_scaler, os.path.splitext(SPATIAL_SCALER_FILENAME)[0])
