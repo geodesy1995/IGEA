@@ -175,8 +175,9 @@ class SchemaModel:
         
         classifier = Dense(no_outputs, activation='sigmoid', name = 'class')(fc_2)
         
-        #adversarial compenent
-        adverse= Dense(1, activation='softmax', name = 'adverse')(latent_rep)
+        # Binary source discriminator: OSM rows are labeled 1, KG rows are labeled 0.
+        # A one-unit softmax always returns 1 and makes the adversarial BCE explode.
+        adverse= Dense(1, activation='sigmoid', name = 'adverse')(latent_rep)
         
         
         model = Model(inputs, [classifier, adverse])
