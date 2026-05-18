@@ -22,6 +22,7 @@ from attention import Attention
 from crossAttention import CrossAttention
 from experiment_config import (
     SPATIAL_SCALER_FILENAME,
+    TEST_PREDICTIONS_FILENAME,
     TRAIN_PAIRS_FILENAME,
     build_spatial_matrix,
     fit_spatial_scaler,
@@ -343,9 +344,32 @@ model.fit(
 
 #add confusion matrix
 
-prediction = model.predict(test_inputs, batch_size=BATCH_SIZE)
-prediction = (prediction >= PREDICTION_THRESHOLD)
+probabilities = model.predict(test_inputs, batch_size=BATCH_SIZE).reshape(-1)
+prediction = (probabilities >= PREDICTION_THRESHOLD)
 runtime = time.time() - starttime
+
+test_frame = data.iloc[test_idx].reset_index(drop=True).copy()
+if 'osm_uid' not in test_frame.columns and 'osm_id' in test_frame.columns:
+    test_frame['osm_uid'] = test_frame['osm_id'].astype(str)
+test_predictions = pd.DataFrame({
+    'wkid': test_frame['wkid'] if 'wkid' in test_frame.columns else '',
+    'osm_uid': test_frame['osm_uid'] if 'osm_uid' in test_frame.columns else '',
+    'osm_id': test_frame['osm_id'] if 'osm_id' in test_frame.columns else '',
+    'match': y_osm_test.astype(bool),
+    'probability': probabilities,
+    'prediction': prediction.astype(bool),
+})
+for column in ['dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon']:
+    test_predictions[column] = (
+        pd.to_numeric(test_frame[column], errors='coerce').fillna(0.0)
+        if column in test_frame.columns
+        else 0.0
+    )
+test_predictions.to_csv(
+    os.path.join(DATA_DIR, TEST_PREDICTIONS_FILENAME),
+    sep='\t',
+    index=False,
+)
 
 with open(os.path.join(DATA_DIR, 'class_report.txt'), 'w', encoding='utf-8') as file:
     report = metrics.classification_report(y_osm_test, prediction, zero_division=0)
@@ -390,6 +414,7 @@ write_experiment_metadata(
         "val_rows": int(len(val_idx)),
         "test_rows": int(len(test_idx)),
         "test_positive_support": int(np.sum(y_osm_test == 1.0)),
+        "test_predictions_filename": TEST_PREDICTIONS_FILENAME,
         "spatial_scaler": "standard_scaler_fit_on_train_split" if USE_SPATIAL_INPUT else "none",
         "spatial_distance_transform": "log1p" if "dist" in SPATIAL_FEATURES else "none",
     },

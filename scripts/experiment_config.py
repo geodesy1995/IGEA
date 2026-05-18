@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 TRAIN_PAIRS_FILENAME = "train pairs.tsv"
 UNMATCHED_PAIRS_FILENAME = "unmatched pairs.tsv"
 SPATIAL_SCALER_FILENAME = "spatial scaler.sav"
+TEST_PREDICTIONS_FILENAME = "test predictions.tsv"
 
 AVAILABLE_SPATIAL_FEATURES = (
     "dist",
