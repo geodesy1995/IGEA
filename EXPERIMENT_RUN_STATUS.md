@@ -109,7 +109,7 @@ all_spatial:
   runtime = 00:44:33
 ```
 
-Interpretation: this run proved that the enlarged OSM-linked pair pipeline can reach sufficient positive support and non-zero topology signal. However, it is not a valid performance estimate because candidate text still contained `wkid` and the model used row-level splitting at the time. Regenerate candidate pairs and rerun smoke after the leakage fixes below before using metrics.
+Interpretation: this run proved that the enlarged OSM-linked pair pipeline can reach sufficient positive support. However, it is not a valid performance estimate because candidate text still contained `wkid` and the model used row-level splitting at the time. Regenerate candidate pairs and rerun smoke after the leakage fixes below before using metrics.
 
 ## Implemented Normalization Changes
 
@@ -126,7 +126,7 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 - Direct OSM `wikipedia`/`wikidata` gold positives are preserved even when they fall outside the 2.5 km ordinary candidate radius or outside the top 100 ordinary candidates.
 - Candidate generation writes `candidate_generation_audit.csv`; the cached runner merges its gold-preservation metrics and split-aware positive support into `candidate_audit.csv`.
 - The cached runner rejects reused common artifacts when their generation audit is missing or their `dist_threshold` / `max_candidates` do not match the current config.
-- `bbox_overlap` uses `ST_Intersects(OSM geometry, KG point)`.
+- `bbox_overlap` is still generated as a diagnostic column but has been removed from model inputs and default ablation variants.
 - Distance, bearing, and coordinate offsets use OSM geometry centroid.
 - Very large polygons are excluded from normal candidate search unless they are directly linked to the KG title.
 - PostGIS candidate queries have per-query timeouts.

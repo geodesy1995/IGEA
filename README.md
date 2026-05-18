@@ -124,8 +124,8 @@ spatial context controls the Urban AI extension that adds relational spatial cue
 
 | option | use |
 | ------ | --- |
-|variant|Named spatial feature set. Supported values: original, bearing, offset, topology, all_spatial, no_bearing, no_offset, no_topology.|
-|features|Explicit comma-separated feature list. If set, this overrides the named variant. Supported features: dist, bearing_sin, bearing_cos, d_lat, d_lon, bbox_overlap.|
+|variant|Named spatial feature set. Supported values: original, bearing, offset, all_spatial, no_bearing, no_offset.|
+|features|Explicit comma-separated feature list. If set, this overrides the named variant. Supported features: dist, bearing_sin, bearing_cos, d_lat, d_lon.|
 |encoder_units|Comma-separated Dense layer sizes for the spatial context encoder. The original IGEA baseline uses only dist and keeps the distance-scalar path.|
 
 ### llm verifier
@@ -248,7 +248,7 @@ The main abstract-aligned model is represented by:
 ```ini
 [spatial context]
 variant=all_spatial
-features=dist,bearing_sin,bearing_cos,d_lat,d_lon,bbox_overlap
+features=dist,bearing_sin,bearing_cos,d_lat,d_lon
 
 [llm verifier]
 enabled=False
@@ -304,7 +304,7 @@ Import OSM features into PostGIS:
 powershell -ExecutionPolicy Bypass -File scripts\import_ireland_osm.ps1
 ```
 
-The import script uses the Docker image `iboates/osm2pgsql:latest`, so `osm2pgsql` does not need to be installed on the Windows host. It creates the `ireland_features` table expected by the experiment configs. The table stores nodes, ways, and selected relations with `osm_uid`, `osm_type`, `osm_id`, `tags`, and Web Mercator geometry. Distance, bearing, and offset features use the geometry centroid, while `bbox_overlap` uses `ST_Intersects(OSM geometry, KG point)`.
+The import script uses the Docker image `iboates/osm2pgsql:latest`, so `osm2pgsql` does not need to be installed on the Windows host. It creates the `ireland_features` table expected by the experiment configs. The table stores nodes, ways, and selected relations with `osm_uid`, `osm_type`, `osm_id`, `tags`, and Web Mercator geometry. Distance, bearing, and offset features use the geometry centroid. `bbox_overlap` is still generated as a diagnostic column but is not part of the default spatial model or ablation matrix.
 
 The default experiment configs use an English-language Ireland setup:
 
@@ -371,7 +371,7 @@ Candidate generation has the following safeguards for the OSM-linked DBpedia set
 |max_train_false_per_entity|Keep all positive pairs, but cap false training pairs per KG entity to control class imbalance and runtime.|
 |query_timeout_ms|Set a PostGIS statement timeout per candidate query so one slow entity cannot stall the whole run.|
 
-The cached runner writes `coverage_report.csv`, `candidate_generation_audit.csv`, and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, split-aware test true support of at least 20, zero missing direct gold positives, and non-zero `bbox_overlap` support for topology variants. Reused common artifacts must include a matching `candidate_generation_audit.csv`; stale 10 km / 200-candidate artifacts fail audit and must be regenerated.
+The cached runner writes `coverage_report.csv`, `candidate_generation_audit.csv`, and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, split-aware test true support of at least 20, and zero missing direct gold positives. Reused common artifacts must include a matching `candidate_generation_audit.csv`; stale 10 km / 200-candidate artifacts fail audit and must be regenerated.
 
 Leakage controls are required for scientific runs:
 
@@ -453,11 +453,9 @@ Default variants:
 |original|Original IGEA-style distance-only baseline.|
 |bearing|Distance plus bearing_sin and bearing_cos.|
 |offset|Distance plus coordinate offsets d_lat and d_lon.|
-|topology|Distance plus bbox_overlap.|
-|all_spatial|Full Spatial Context Encoder.|
-|no_bearing|Leave-one-out test removing bearing from all_spatial.|
-|no_offset|Leave-one-out test removing coordinate offsets from all_spatial.|
-|no_topology|Leave-one-out test removing topology from all_spatial.|
+|all_spatial|Distance, bearing_sin, bearing_cos, d_lat, and d_lon.|
+|no_bearing|Leave-one-out test removing bearing_sin and bearing_cos from all_spatial.|
+|no_offset|Leave-one-out test removing d_lat and d_lon from all_spatial.|
 |all_spatial_dummy_gate|Full spatial model with dummy selective verifier logging enabled.|
 |all_spatial_real_llm_gate_margin003|OpenAI verifier follow-up using all_spatial artifacts and a 0.03 low-margin gate.|
 |all_spatial_real_llm_gate_margin005|OpenAI verifier follow-up using all_spatial artifacts and a 0.05 low-margin gate.|

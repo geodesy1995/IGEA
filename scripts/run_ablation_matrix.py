@@ -13,11 +13,9 @@ DEFAULT_VARIANTS = [
     "original",
     "bearing",
     "offset",
-    "topology",
     "all_spatial",
     "no_bearing",
     "no_offset",
-    "no_topology",
     "all_spatial_dummy_gate",
 ]
 

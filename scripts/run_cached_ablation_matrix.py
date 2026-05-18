@@ -258,7 +258,7 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
     min_train_true = config.getint("quality gates", "min_train_true", fallback=100)
     min_train_rows = config.getint("quality gates", "min_train_rows", fallback=2000)
     min_test_true_support = config.getint("quality gates", "min_test_true_support", fallback=20)
-    require_nonzero_bbox = config.getboolean("quality gates", "require_nonzero_bbox", fallback=True)
+    require_nonzero_bbox = config.getboolean("quality gates", "require_nonzero_bbox", fallback=False)
     expected_dist_threshold = config.getint("candidate generation", "dist_threshold")
     expected_max_candidates = config.getint("candidate generation", "max_candidates")
     generation_audit = read_candidate_generation_audit(common_it_dir)

@@ -18,7 +18,6 @@ AVAILABLE_SPATIAL_FEATURES = (
     "bearing_cos",
     "d_lat",
     "d_lon",
-    "bbox_overlap",
 )
 
 SPATIAL_VARIANTS: Dict[str, List[str]] = {
@@ -27,11 +26,9 @@ SPATIAL_VARIANTS: Dict[str, List[str]] = {
     "distance_only": ["dist"],
     "bearing": ["dist", "bearing_sin", "bearing_cos"],
     "offset": ["dist", "d_lat", "d_lon"],
-    "topology": ["dist", "bbox_overlap"],
     "all_spatial": list(AVAILABLE_SPATIAL_FEATURES),
-    "no_bearing": ["dist", "d_lat", "d_lon", "bbox_overlap"],
-    "no_offset": ["dist", "bearing_sin", "bearing_cos", "bbox_overlap"],
-    "no_topology": ["dist", "bearing_sin", "bearing_cos", "d_lat", "d_lon"],
+    "no_bearing": ["dist", "d_lat", "d_lon"],
+    "no_offset": ["dist", "bearing_sin", "bearing_cos"],
 }
 
 
