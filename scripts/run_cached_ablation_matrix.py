@@ -69,6 +69,12 @@ def make_common_config(base: configparser.ConfigParser, data_folder: str) -> con
     return config
 
 
+def is_wikidata_direct(config: configparser.ConfigParser) -> bool:
+    kg_source = config.get("meta", "kg_source", fallback="").lower()
+    entity_source = config.get("wikidata scrape", "entity_source", fallback="country").lower()
+    return kg_source == "wikidata" and entity_source == "osm_linked"
+
+
 def make_variant_config(
     base: configparser.ConfigParser,
     variant: str,
@@ -355,6 +361,13 @@ def run_common_pipeline(common_it_dir: str, common_config: configparser.ConfigPa
     os.makedirs(common_it_dir, exist_ok=True)
     kg_source = common_config.get("meta", "kg_source", fallback="dbpedia").lower()
     run_step("./scripts/prepareSchema.py", common_config_path)
+    if is_wikidata_direct(common_config):
+        run_step("./scripts/osm2rdf.py", normalized_data_folder(common_it_dir), common_config_path)
+        run_step("./scripts/scrapeWikiData.py", normalized_data_folder(common_it_dir), common_config_path)
+        run_step("./scripts/createDirectView.py", common_config_path)
+        run_candidate_generation_with_gate(common_it_dir, common_config, common_config_path)
+        return
+
     run_step("./scripts/osm2rdf.py", normalized_data_folder(common_it_dir), common_config_path)
     if kg_source == "wikidata":
         run_step("./scripts/readRDFWikidata.py", normalized_data_folder(common_it_dir), common_config_path)

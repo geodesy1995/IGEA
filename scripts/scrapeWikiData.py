@@ -7,6 +7,7 @@ import configparser
 import asyncio
 import asyncpg
 import re
+import csv
 
 DATA_DIR = sys.argv[1]
 CONFIG_PATH = sys.argv[2]
@@ -17,6 +18,7 @@ config.read(CONFIG_PATH)
 
 OUTPUT_PATH = DATA_DIR + 'wikidata dump.parquet'
 CLASSFILE_PATH = DATA_DIR + 'wikidata classes.txt'
+COVERAGE_PATH = DATA_DIR + 'coverage_report.csv'
 TESTRUN = config.getboolean('misc', 'testrun')
 LIMIT = config.getint('misc', 'limit')
 COUNTRY_ID = config.get('wikidata scrape', 'country_id')
@@ -33,15 +35,26 @@ BASE_TABLE = config.get('entity linking', 'base_table', fallback='')
 sparql = SPARQLWrapper("https://query.wikidata.org/sparql",
                        returnFormat='json',
                        agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5)')
+sparql.setTimeout(config.getint('wikidata scrape', 'timeout_seconds', fallback=120))
 
-print('reading classes')
-print(f'from: {CLASSFILE_PATH}')
+endpoint_error_count = 0
+coverage_metrics = {
+    'entity_source': ENTITY_SOURCE,
+    'scrape_values': ','.join(SCRAPE_MODES),
+    'osm_linked_qids': 0,
+    'wikidata_coordinate_entities': 0,
+    'endpoint_error_count': 0,
+}
+
 linked_classes = []
-with open(CLASSFILE_PATH, 'r', encoding='utf-8') as file:
-    for line in file.readlines():
-        text = line.strip().replace('\n', '')
-        if text:
-            linked_classes.append(text)
+if ENTITY_SOURCE != 'osm_linked':
+    print('reading classes')
+    print(f'from: {CLASSFILE_PATH}')
+    with open(CLASSFILE_PATH, 'r', encoding='utf-8') as file:
+        for line in file.readlines():
+            text = line.strip().replace('\n', '')
+            if text:
+                linked_classes.append(text)
 
 def entity_batches(entity_dict: dict, step_size: int):
     keys = list(entity_dict.keys())
@@ -50,6 +63,21 @@ def entity_batches(entity_dict: dict, step_size: int):
         batch = keys[i:min(i + step_size, len(keys))]
         yield i, batch
         i += len(batch)
+
+
+def record_endpoint_error(context: str, exc: Exception) -> None:
+    global endpoint_error_count
+    endpoint_error_count += 1
+    print(f'An error occurred {context}: {repr(exc)}')
+
+
+def sparql_query(query: str, context: str):
+    try:
+        sparql.setQuery(query)
+        return sparql.query().convert()
+    except Exception as exc:
+        record_endpoint_error(context, exc)
+        return None
 
 
 async def collect_osm_wikidata_qids() -> list:
@@ -81,6 +109,7 @@ def collect_osm_linked_entities() -> dict:
     qids = asyncio.run(collect_osm_wikidata_qids())
     if TESTRUN:
         qids = qids[:LIMIT]
+    coverage_metrics['osm_linked_qids'] = len(qids)
 
     query = """
 PREFIX wd: <http://www.wikidata.org/entity/>
@@ -102,14 +131,17 @@ SELECT ?item ?location (SAMPLE(?type) AS ?type) WHERE {
             batch = qids[i:min(i + step_size, len(qids))]
             try:
                 id_string = ''.join(f"wd:{qid} " for qid in batch)
-                sparql.setQuery(query % id_string)
-                results = sparql.query().convert()
+                results = sparql_query(query % id_string, f'gathering linked qids {i} - {i + len(batch)}')
+                if results is None:
+                    pbar.update(len(batch))
+                    i += len(batch)
+                    continue
                 for res in results['results']['bindings']:
                     wkid = res['item']['value'].split('/')[-1]
                     clazz = res.get('type', {}).get('value', '').split('/')[-1] or ''
                     entities[wkid] = {'wkid': wkid, 'location': res['location']['value'], 'type': clazz}
             except Exception as exc:
-                pbar.write(f'An error occurred gathering linked qids {i} - {i + len(batch)}: {repr(exc)}')
+                record_endpoint_error(f'processing linked qids {i} - {i + len(batch)}', exc)
             pbar.update(len(batch))
             i += len(batch)
     return entities
@@ -134,13 +166,15 @@ SELECT ?item ?type ?location WHERE {
         for clazz in linked_classes:
             try:
                 pbar.set_postfix_str(f'class: {clazz}')
-                sparql.setQuery(query % (COUNTRY_ID, clazz))
-                results = sparql.query().convert()
+                results = sparql_query(query % (COUNTRY_ID, clazz), f'gathering {clazz}')
+                if results is None:
+                    pbar.update(1)
+                    continue
                 for res in results['results']['bindings']:
                     wkid = res['item']['value'].split('/')[-1]
                     entities.update({wkid: {'wkid': wkid, 'location': res['location']['value'], 'type': clazz}})
             except Exception as exc:
-                pbar.write(f'An error occurred gathering {clazz}: {repr(exc)}')
+                record_endpoint_error(f'processing {clazz}', exc)
             pbar.update(1)
             if TESTRUN:
                 if len(entities) > LIMIT:
@@ -177,11 +211,14 @@ if 'popularity' in SCRAPE_MODES:
     step_size = 300
     with tqdm(total=len(entities), desc='-updating popularity') as pbar:
         for i, batch in entity_batches(entities, step_size):
-            id_string = ''.join(f"wd:{e} " for e in batch)
-            sparql.setQuery(pop_query % id_string)
-            results = sparql.query().convert()
-            for res in results['results']['bindings']:
-                entities[res['kgentity']['value'].split('/')[-1]].update({'pop': int(res['prop']['value'])})
+            try:
+                id_string = ''.join(f"wd:{e} " for e in batch)
+                results = sparql_query(pop_query % id_string, f'updating popularity {i} - {i + len(batch)}')
+                if results is not None:
+                    for res in results['results']['bindings']:
+                        entities[res['kgentity']['value'].split('/')[-1]].update({'pop': int(res['prop']['value'])})
+            except Exception as exc:
+                record_endpoint_error(f'processing popularity {i} - {i + len(batch)}', exc)
             pbar.update(len(batch))
 
 
@@ -209,11 +246,14 @@ if 'type labels' in SCRAPE_MODES:
 
     with tqdm(total=len(entities), desc='-updating labels', miniters=1) as pbar:
         for i, batch in entity_batches(entities, step_size):
-            id_string = ''.join(f"wd:{e} " for e in batch)
-            sparql.setQuery(label_query % id_string)
-            results = sparql.query().convert()
-            for res in results['results']['bindings']:
-                entities[res['kgentity']['value'].split('/')[-1]].update({'labels': res['labels']['value']})
+            try:
+                id_string = ''.join(f"wd:{e} " for e in batch)
+                results = sparql_query(label_query % id_string, f'updating labels {i} - {i + len(batch)}')
+                if results is not None:
+                    for res in results['results']['bindings']:
+                        entities[res['kgentity']['value'].split('/')[-1]].update({'labels': res['labels']['value']})
+            except Exception as exc:
+                record_endpoint_error(f'processing labels {i} - {i + len(batch)}', exc)
             pbar.update(len(batch))
 
 # add names to entities
@@ -237,11 +277,14 @@ if 'name' in SCRAPE_MODES:
 
     with tqdm(total=len(entities), desc='-updating names', miniters=1) as pbar:
         for i, batch in entity_batches(entities, step_size):
-            id_string = ''.join(f"wd:{e} " for e in batch)
-            sparql.setQuery(name_query % (id_string, NAME_LANGUAGE))
-            results = sparql.query().convert()
-            for res in results['results']['bindings']:
-                entities[res['kgentity']['value'].split('/')[-1]].update({'name': res['kgentityLabel']['value']})
+            try:
+                id_string = ''.join(f"wd:{e} " for e in batch)
+                results = sparql_query(name_query % (id_string, NAME_LANGUAGE), f'updating names {i} - {i + len(batch)}')
+                if results is not None:
+                    for res in results['results']['bindings']:
+                        entities[res['kgentity']['value'].split('/')[-1]].update({'name': res['kgentityLabel']['value']})
+            except Exception as exc:
+                record_endpoint_error(f'processing names {i} - {i + len(batch)}', exc)
             pbar.update(len(batch))
 
 
@@ -274,8 +317,10 @@ if 'full properties' in SCRAPE_MODES:
         for i, batch in entity_batches(entities, step_size):
             try:
                 id_string = ''.join(f"wd:{e} " for e in batch)
-                sparql.setQuery(property_query % id_string)
-                results = sparql.query().convert()
+                results = sparql_query(property_query % id_string, f'gathering properties {i} - {i + len(batch)}')
+                if results is None:
+                    pbar.update(len(batch))
+                    continue
                 cur_id = ''
                 property_pairs = set()
                 for res in results['results']['bindings']:
@@ -292,8 +337,41 @@ if 'full properties' in SCRAPE_MODES:
                 if cur_id:
                     entities[cur_id].update({'properties': ' '.join(property_pairs)})
             except Exception as exc:
-                pbar.write(f'An error occurred gathering {i} - {i + len(batch)}: {repr(exc)}')
+                record_endpoint_error(f'processing properties {i} - {i + len(batch)}', exc)
             pbar.update(len(batch))
+
+
+def ensure_entity_defaults(entity_dict: dict) -> None:
+    for wkid, entity in entity_dict.items():
+        entity.setdefault('wkid', wkid)
+        entity.setdefault('location', '')
+        entity.setdefault('type', '')
+        entity.setdefault('pop', 0)
+        entity.setdefault('labels', '')
+        entity.setdefault('name', '')
+        if not entity.get('properties'):
+            parts = [
+                f"label {entity.get('name', '')}".strip(),
+                f"type {entity.get('type', '')}".strip(),
+                f"labels {entity.get('labels', '')}".strip(),
+            ]
+            entity['properties'] = ' '.join(part for part in parts if len(part.split()) > 1)
+
+
+def write_classes(entity_dict: dict) -> None:
+    classes = sorted({entity.get('type', '') for entity in entity_dict.values() if entity.get('type')})
+    with open(CLASSFILE_PATH, 'w', encoding='utf-8', newline='') as file:
+        file.write('\n'.join(classes))
+
+
+def write_coverage_report() -> None:
+    coverage_metrics['wikidata_coordinate_entities'] = len(entities)
+    coverage_metrics['endpoint_error_count'] = endpoint_error_count
+    with open(COVERAGE_PATH, 'w', encoding='utf-8', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=['metric', 'value'])
+        writer.writeheader()
+        for metric, value in coverage_metrics.items():
+            writer.writerow({'metric': metric, 'value': value})
 
 def write_to_file(entity_dict: dict, filename: str) -> None:
     """
@@ -302,11 +380,14 @@ def write_to_file(entity_dict: dict, filename: str) -> None:
     :param filename: path to write file to
     :return:
     """
+    ensure_entity_defaults(entity_dict)
     data_list = list(entity_dict.values())
     table = pa.Table.from_pylist(data_list)
     with open(filename, 'wb') as file:
         pq.write_table(table, file)
 
+write_classes(entities)
+write_coverage_report()
 print('-writing scraped data')
 print(f'-to: {OUTPUT_PATH}')
 write_to_file(entities, OUTPUT_PATH)

@@ -75,20 +75,20 @@ async def execute_sql():
     if DATA_SOURCE == 'wikidata':
         init_sql = f"""
         INSERT INTO {TABLE_NAME} (wkid, osm_uid, osm_type, osm_id, confidence, iteration)
-            SELECT tags -> 'wikidata', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
+            SELECT tags ->> 'wikidata', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
             FROM {BASE_TABLE}
-            WHERE tags -> 'wikidata' is not null
+            WHERE tags ->> 'wikidata' ~ '^Q[0-9]+$'
         """
     else:
         init_sql = f"""
         INSERT INTO {TABLE_NAME} (wkid, osm_uid, osm_type, osm_id, confidence, iteration)
-            SELECT tags -> 'wikipedia', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
+            SELECT tags ->> 'wikipedia', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
             FROM {BASE_TABLE}
-            WHERE tags -> 'wikipedia' is not null
+            WHERE tags ->> 'wikipedia' is not null
               AND (
-                  lower(tags -> 'wikipedia') LIKE '{DBPEDIA_SOURCE}:%'
-                  OR lower(tags -> 'wikipedia') LIKE 'http://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
-                  OR lower(tags -> 'wikipedia') LIKE 'https://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
+                  lower(tags ->> 'wikipedia') LIKE '{DBPEDIA_SOURCE}:%'
+                  OR lower(tags ->> 'wikipedia') LIKE 'http://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
+                  OR lower(tags ->> 'wikipedia') LIKE 'https://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
               )
         """
 

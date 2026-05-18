@@ -129,7 +129,7 @@ def normalize_linked_id(value):
     if DATA_SOURCE == 'dbpedia':
         normalized, _reason = normalize_wikipedia_tag(value, DBPEDIA_SOURCE)
         return normalized
-    return value
+    return str(value).strip().strip('"')
 
 
 def dbpedia_direct_link_sql(parameter_index: int = 6) -> str:
