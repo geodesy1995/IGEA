@@ -2,10 +2,11 @@
 
 ## Ready
 
-- Python commands must use `venv\Scripts\python`.
+- Local Windows Python commands use `venv\Scripts\python`.
+- GPU experiment commands use `scripts\run_gpu_docker.ps1`, which runs the project inside `igea-tensorflow-gpu:2.12`.
 - Core Python dependencies are installed in `D:\projects\IGEA\venv`.
 - `config/pw.txt` exists for local Docker PostGIS password `igea`.
-- Docker PostGIS is running and reachable.
+- Docker PostGIS data/config is prepared. Start it with `docker compose up -d postgis` before the next experiment run.
 - Ireland/Northern Ireland PBF is present at `data/raw/ireland-and-northern-ireland-latest.osm.pbf`.
 - English fastText model is present at `models/fasttext/cc.en.300.bin`.
 - Regenerated NCA CSVs exist:
@@ -14,7 +15,7 @@
 - Docker/PostGIS runtime files are in `docker-compose.yml`, `docker/postgis/init.sql`, and `docker/osm2pgsql/ireland_features.lua`.
 - `scripts/import_ireland_osm.ps1` imports full OSM node/way/relation features through Docker-based `osm2pgsql`.
 - `scripts/build_nca_vocab.py` can regenerate `config/osmTagKeyWiki.csv` and `config/osmKeyWiki.csv` from PBF or RDF.
-- `scripts/run_cached_ablation_matrix.py` can reuse DBpedia/NCA/candidate artifacts across ablation variants and seeds.
+- `scripts/run_cached_ablation_matrix.py` can reuse DBpedia or Wikidata NCA/KG/candidate artifacts across ablation variants and seeds.
 - `scripts/summarize_ablation_results.py` writes aggregate and raw ablation summaries.
 - `scripts/cap_candidate_train_pairs.py` keeps all positive pairs and caps false pairs per KG entity for runtime/class balance.
 
@@ -115,6 +116,8 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 - DBpedia entity collection supports `entity_source=osm_linked`.
 - OSM `wikipedia` tags are normalized to DBpedia resource titles.
 - DBpedia entities without DBpedia coordinates are excluded from the main KG dump.
+- Wikidata entity collection now supports `entity_source=osm_linked` using OSM `wikidata=Q...` tags as the seed entity list.
+- `readRDFWikidata.py` now preserves OSM type prefixes for node/way/relation IDs and fixes batched `VALUES` queries for QIDs.
 - OSM coordinate fallback is not used for KG coordinates.
 - `ireland_features` includes nodes, ways, and selected relations with geometry.
 - Candidate rows track `osm_uid` so nodes, ways, and relations do not collide on numeric `osm_id`.
@@ -129,8 +132,9 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 
 ## Blocked / Not Final Yet
 
-- Wikidata smoke/full runs remain blocked by Wikidata Query Service HTTP 429 rate limiting observed on 2026-05-17.
-- Full DBpedia ablation matrix with 5 seeds is not running right now. Based on the smoke timing, all variants across 5 seeds may take multiple days on CPU.
+- Wikidata may still be limited by Wikidata Query Service rate limits, but it now has the same OSM-linked path as DBpedia.
+- The previous CPU full DBpedia ablation matrix was manually cancelled after `dbpedia_original_seed42` completed and `dbpedia_original_seed43` had started.
+- GPU TensorFlow is available through Docker. Smoke test result: TensorFlow 2.12.0, `built_with_cuda=True`, `GPU:0` detected on RTX 4060.
 - The current `original`/`all_spatial` smoke scores are leakage-invalid. They should stay in the record only as a pipeline validation run.
 
 ## Rebuild Commands
@@ -165,6 +169,24 @@ Regenerate OSM-linked DBpedia common artifacts:
 
 ```powershell
 venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --variants original --seeds 42 --output-root .\data\ablation_dbpedia_osm_linked
+```
+
+Run GPU smoke:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
+```
+
+Run OSM-linked DBpedia matrix on GPU:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_gpu --seeds 42,43,44,45,46"
+```
+
+Run OSM-linked Wikidata matrix on GPU:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_gpu --seeds 42,43,44,45,46"
 ```
 
 Reuse the current common artifacts for a fast smoke:

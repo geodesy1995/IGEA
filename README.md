@@ -217,7 +217,7 @@ In this chapter the function of each script will be outlined briefly. The script
 | base_llm | verifier interface and dummy verifier used by the selective LLM gate |
 | build_nca_vocab | regenerate osmTagKeyWiki.csv and osmKeyWiki.csv from linked OSM entities when the original NCA vocabulary files are unavailable |
 | run_ablation_matrix | generate per-variant configs for original IGEA, spatial ablations, leave-one-out ablations, and dummy-gate runs |
-| run_cached_ablation_matrix | DBpedia-only ablation runner that reuses common NCA/KG/candidate artifacts across spatial variants |
+| run_cached_ablation_matrix | cached ablation runner for DBpedia or Wikidata that reuses common NCA/KG/candidate artifacts across spatial variants |
 | summarize_ablation_results | collect class_report and metadata files into a CSV table with delta F1 versus original IGEA |
 
 ### legacy Embeddings
@@ -356,7 +356,9 @@ If Wikidata Query Service is temporarily rate-limiting requests, run the DBpedia
 venv\Scripts\python runExperiment.py config\config_smoke_ireland_dbpedia.ini
 ```
 
-The DBpedia configs currently use `entity_source=osm_linked`. Instead of relying only on `dbo:country`, OSM `wikipedia` tags are normalized to DBpedia resource titles and queried in batches. DBpedia entities without DBpedia coordinates are excluded from the main run; OSM coordinates are not used as KG-coordinate fallback.
+The DBpedia configs use `entity_source=osm_linked`. Instead of relying only on `dbo:country`, OSM `wikipedia` tags are normalized to DBpedia resource titles and queried in batches. DBpedia entities without DBpedia coordinates are excluded from the main run; OSM coordinates are not used as KG-coordinate fallback.
+
+The Wikidata configs also support `entity_source=osm_linked`. In this mode, OSM `wikidata=Q...` tags seed the KG entity list directly, and `scrapeWikiData.py` queries those QIDs for Wikidata coordinates and properties. This avoids the earlier Ireland-only `P17=Q27` country/class bottleneck and makes Wikidata comparable to the OSM-linked DBpedia setup.
 
 Candidate generation has the following safeguards for the OSM-linked DBpedia setup:
 
@@ -393,11 +395,41 @@ The command above is a dry run: it writes generated configs and prints the comma
 venv\Scripts\python scripts\run_ablation_matrix.py config\config_ireland_wikidata.ini config\config_ireland_dbpedia.ini --execute
 ```
 
-For DBpedia runs, use the cached runner after one common run has produced NCA/KG/candidate artifacts. This avoids repeating slow DBpedia SPARQL collection for every spatial variant:
+For DBpedia or Wikidata runs, use the cached runner after one common run has produced NCA/KG/candidate artifacts. This avoids repeating slow KG/SPARQL collection for every spatial variant:
 
 ```powershell
 venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_cached
 ```
+
+For Wikidata:
+
+```powershell
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_wikidata.ini --output-root .\data\ablation_wikidata_osm_linked
+```
+
+### GPU execution on Windows
+
+Native Windows TensorFlow 2.11+ does not support NVIDIA GPU execution. This repository therefore uses a Linux TensorFlow GPU Docker image for GPU runs while keeping the project files on the Windows workspace.
+
+Verify GPU TensorFlow:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
+```
+
+Run the cached DBpedia matrix on GPU:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_gpu --seeds 42,43,44,45,46"
+```
+
+Run the cached Wikidata matrix on GPU:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_gpu --seeds 42,43,44,45,46"
+```
+
+The GPU configs use `host.docker.internal` for PostGIS because `localhost` inside the GPU container refers to the container itself. Start PostGIS with `docker compose up -d postgis` before running the GPU experiment.
 
 To reuse common artifacts from an earlier matrix directory:
 

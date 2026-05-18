@@ -48,8 +48,9 @@ def write_config(config: configparser.ConfigParser, path: str) -> None:
 def load_base_config(path: str) -> configparser.ConfigParser:
     config = configparser.ConfigParser()
     config.read(path)
-    if config.get("meta", "kg_source", fallback="").lower() != "dbpedia":
-        raise ValueError("run_cached_ablation_matrix.py currently supports DBpedia configs only.")
+    kg_source = config.get("meta", "kg_source", fallback="").lower()
+    if kg_source not in {"dbpedia", "wikidata"}:
+        raise ValueError("run_cached_ablation_matrix.py supports DBpedia and Wikidata configs.")
     return config
 
 
@@ -57,7 +58,8 @@ def make_common_config(base: configparser.ConfigParser, data_folder: str) -> con
     config = configparser.ConfigParser()
     config.read_dict({section: dict(base.items(section)) for section in base.sections()})
     ensure_section(config, "experiment")
-    config.set("experiment", "name", "dbpedia_common_cached")
+    kg_source = config.get("meta", "kg_source", fallback="kg").lower()
+    config.set("experiment", "name", f"{kg_source}_common_cached")
     config.set("meta", "data_folder", normalized_data_folder(data_folder))
     config.set("meta", "num_iterations", "1")
     return config
@@ -83,7 +85,8 @@ def make_variant_config(
         raise ValueError(f"Unknown variant '{variant}'")
 
     ensure_section(config, "experiment")
-    config.set("experiment", "name", f"dbpedia_{variant}_seed{seed}")
+    kg_source = config.get("meta", "kg_source", fallback="kg").lower()
+    config.set("experiment", "name", f"{kg_source}_{variant}_seed{seed}")
 
     ensure_section(config, "spatial context")
     config.set("spatial context", "variant", spatial_variant)
@@ -221,12 +224,20 @@ def run_candidate_generation_with_gate(common_it_dir: str, common_config: config
 
 def run_common_pipeline(common_it_dir: str, common_config: configparser.ConfigParser, common_config_path: str) -> None:
     os.makedirs(common_it_dir, exist_ok=True)
+    kg_source = common_config.get("meta", "kg_source", fallback="dbpedia").lower()
     run_step("./scripts/prepareSchema.py", common_config_path)
     run_step("./scripts/osm2rdf.py", normalized_data_folder(common_it_dir), common_config_path)
-    run_step("./scripts/readRDFDBpedia.py", normalized_data_folder(common_it_dir), common_config_path)
+    if kg_source == "wikidata":
+        run_step("./scripts/readRDFWikidata.py", normalized_data_folder(common_it_dir), common_config_path)
+    else:
+        run_step("./scripts/readRDFDBpedia.py", normalized_data_folder(common_it_dir), common_config_path)
     run_step("./scripts/schemaMatch.py", normalized_data_folder(common_it_dir), common_config_path)
-    run_step("./scripts/reformClassesDBP.py", normalized_data_folder(common_it_dir), common_config_path)
-    run_step("./scripts/scrapeDBPedia.py", normalized_data_folder(common_it_dir), common_config_path)
+    if kg_source == "wikidata":
+        run_step("./scripts/reformClasses.py", normalized_data_folder(common_it_dir), common_config_path)
+        run_step("./scripts/scrapeWikiData.py", normalized_data_folder(common_it_dir), common_config_path)
+    else:
+        run_step("./scripts/reformClassesDBP.py", normalized_data_folder(common_it_dir), common_config_path)
+        run_step("./scripts/scrapeDBPedia.py", normalized_data_folder(common_it_dir), common_config_path)
     run_candidate_generation_with_gate(common_it_dir, common_config, common_config_path)
 
 
@@ -242,9 +253,9 @@ def run_variant(variant_it_dir: str, variant_config_path: str, use_attention: bo
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run DBpedia ablations while reusing common NCA/KG/candidate artifacts."
+        description="Run KG ablations while reusing common NCA/KG/candidate artifacts."
     )
-    parser.add_argument("config", help="Base DBpedia config.")
+    parser.add_argument("config", help="Base DBpedia or Wikidata config.")
     parser.add_argument(
         "--variants",
         default=",".join(DEFAULT_VARIANTS),
@@ -281,7 +292,8 @@ def main() -> None:
     common_dir = os.path.join(matrix_root, "_common")
     common_it_dir = os.path.join(common_dir, "it_1")
     common_config = make_common_config(base, common_dir)
-    common_config_path = os.path.join(config_dir, "dbpedia_common_cached.ini")
+    kg_source = base.get("meta", "kg_source", fallback="kg").lower()
+    common_config_path = os.path.join(config_dir, f"{kg_source}_common_cached.ini")
     write_config(common_config, common_config_path)
 
     if args.reuse_common_dir:
@@ -303,10 +315,10 @@ def main() -> None:
 
     for variant in variants:
         for seed in seeds:
-            variant_dir = os.path.join(matrix_root, f"dbpedia_{variant}_seed{seed}")
+            variant_dir = os.path.join(matrix_root, f"{kg_source}_{variant}_seed{seed}")
             variant_it_dir = os.path.join(variant_dir, "it_1")
             variant_config = make_variant_config(base, variant, variant_dir, seed)
-            variant_config_path = os.path.join(config_dir, f"dbpedia_{variant}_seed{seed}.ini")
+            variant_config_path = os.path.join(config_dir, f"{kg_source}_{variant}_seed{seed}.ini")
             write_config(variant_config, variant_config_path)
             copy_common_outputs(common_it_dir, variant_it_dir)
             run_variant(variant_it_dir, variant_config_path, use_attention)

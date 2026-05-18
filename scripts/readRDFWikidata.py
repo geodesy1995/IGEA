@@ -56,10 +56,21 @@ for i in range(len(lines)):
     key.append(lines[i][1])
     value.append(lines[i][2])
 
-# remove osm_id prefix
+def normalize_osm_subject(subject: str) -> str:
+    subject = subject.strip('<>')
+    subject = subject.replace('https://www.openstreetmap.org/', '')
+    if subject.startswith('node/'):
+        return 'N' + subject.split('/', 1)[1]
+    if subject.startswith('way/'):
+        return 'W' + subject.split('/', 1)[1]
+    if subject.startswith('relation/'):
+        return 'R' + subject.split('/', 1)[1]
+    return subject.replace('>', '')
+
+
+# remove osm_id prefix and keep OSM type to avoid node/way/relation collisions
 for i in range(len(node)):
-    node[i] = node[i].replace('<https://www.openstreetmap.org/node/', '')
-    node[i] = node[i].replace('>', '')
+    node[i] = normalize_osm_subject(node[i])
 
 # remove key prefix
 for i in range(len(node)):
@@ -137,7 +148,7 @@ sparql = SPARQLWrapper("https://query.wikidata.org/sparql",
                        returnFormat='json')
 with tqdm(total=len(wikiEnt), desc='-collecting wikidata information') as pbar:
     query = """SELECT ?kgentity  ?wdLabel ?ps_ ?ps_Label {
-      VALUES ?kgentity {wd:%s}
+      VALUES ?kgentity {%s}
       ?kgentity ?p ?statement .
       ?statement ?ps ?ps_ .
       
@@ -153,16 +164,16 @@ with tqdm(total=len(wikiEnt), desc='-collecting wikidata information') as pbar:
     } ORDER BY ?wd ?statement ?ps_"""
 
     while i < len(wikiEnt):
-        iterstep = min(len(wikiEnt) - 1, i+300)
+        iterstep = min(len(wikiEnt), i+300)
         mystring = ''.join('wd:{0} '.format(w) for w in wikiEnt[i: iterstep])
         try:
             sparql.setQuery(query % mystring)
             results = sparql.query().convert()
             wiki_Data.append(results)
-        except:  # use general except due to many possible problems with wikidata
-            pbar.write(f'error collecting {i} to {iterstep}')
-        pbar.update(300)
-        i += 300
+        except Exception as exc:  # use general except due to many possible problems with wikidata
+            pbar.write(f'error collecting {i} to {iterstep}: {repr(exc)}')
+        pbar.update(iterstep - i)
+        i = iterstep
 
 
 kgentity = []
