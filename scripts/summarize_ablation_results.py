@@ -91,15 +91,34 @@ def main() -> None:
 
     baseline_f1 = {}
     baseline_groups = {}
+    baseline_prediction_f1 = {}
+    baseline_prediction_groups = {}
     for row in rows:
         if row["spatial_variant"] == "original" and row["f1"] is not None:
             baseline_groups.setdefault(row["kg_source"], []).append(row["f1"])
+        try:
+            prediction_f1 = float(row["prediction_after_verifier_f1"])
+            if row["spatial_variant"] == "original":
+                baseline_prediction_groups.setdefault(row["kg_source"], []).append(prediction_f1)
+        except (TypeError, ValueError):
+            pass
     for kg_source, values in baseline_groups.items():
         baseline_f1[kg_source] = sum(values) / len(values)
+    for kg_source, values in baseline_prediction_groups.items():
+        baseline_prediction_f1[kg_source] = sum(values) / len(values)
 
     for row in rows:
         base = baseline_f1.get(row["kg_source"])
         row["delta_f1_vs_original"] = "" if base is None or row["f1"] is None else row["f1"] - base
+        pred_base = baseline_prediction_f1.get(row["kg_source"])
+        try:
+            row["delta_prediction_f1_vs_original"] = (
+                float(row["prediction_after_verifier_f1"]) - pred_base
+                if pred_base is not None
+                else ""
+            )
+        except (TypeError, ValueError):
+            row["delta_prediction_f1_vs_original"] = ""
         try:
             row["delta_prediction_f1_vs_before_verifier"] = (
                 float(row["prediction_after_verifier_f1"]) - float(row["prediction_before_verifier_f1"])
@@ -136,6 +155,7 @@ def main() -> None:
         "prediction_after_verifier_precision",
         "prediction_after_verifier_recall",
         "prediction_after_verifier_f1",
+        "delta_prediction_f1_vs_original",
         "delta_prediction_f1_vs_before_verifier",
         "prediction_after_verifier_support",
         "run_dir",
@@ -172,6 +192,7 @@ def main() -> None:
             "prediction_after_verifier_f1",
             "prediction_after_verifier_support",
             "delta_prediction_f1_vs_before_verifier",
+            "delta_prediction_f1_vs_original",
             "delta_f1_vs_original",
         ]
         for col in numeric_cols:
@@ -217,6 +238,7 @@ def main() -> None:
                 "estimated_verifier_cost_total": group["estimated_verifier_cost"].sum(),
                 "prediction_before_verifier_f1_mean": group["prediction_before_verifier_f1"].mean(),
                 "prediction_after_verifier_f1_mean": group["prediction_after_verifier_f1"].mean(),
+                "delta_prediction_f1_vs_original_mean": group["delta_prediction_f1_vs_original"].mean(),
                 "delta_prediction_f1_vs_before_verifier_mean": group["delta_prediction_f1_vs_before_verifier"].mean(),
                 "delta_f1_vs_original_mean": group["delta_f1_vs_original"].mean(),
             })
@@ -248,6 +270,7 @@ def main() -> None:
         "estimated_verifier_cost_total",
         "prediction_before_verifier_f1_mean",
         "prediction_after_verifier_f1_mean",
+        "delta_prediction_f1_vs_original_mean",
         "delta_prediction_f1_vs_before_verifier_mean",
         "delta_f1_vs_original_mean",
     ]

@@ -31,6 +31,7 @@ COMMON_FILES = [
     "candidate_generation_audit.csv",
     "coverage_report.csv",
     "candidate_audit.csv",
+    "gold_split_audit.csv",
 ]
 
 
@@ -260,11 +261,14 @@ def positive_support_by_split(train_path: str, config: configparser.ConfigParser
 
 def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tuple:
     train_path = os.path.join(common_it_dir, "train pairs.tsv")
+    unmatched_path = os.path.join(common_it_dir, "unmatched pairs.tsv")
     audit_path = os.path.join(common_it_dir, "candidate_audit.csv")
     min_train_true = config.getint("quality gates", "min_train_true", fallback=100)
     min_train_rows = config.getint("quality gates", "min_train_rows", fallback=2000)
     min_test_true_support = config.getint("quality gates", "min_test_true_support", fallback=20)
     require_nonzero_bbox = config.getboolean("quality gates", "require_nonzero_bbox", fallback=False)
+    min_prediction_true_support = config.getint("quality gates", "min_prediction_true_support", fallback=20)
+    gold_split_enabled = config.getboolean("gold split", "enabled", fallback=False)
     expected_dist_threshold = config.getint("candidate generation", "dist_threshold")
     expected_max_candidates = config.getint("candidate generation", "max_candidates")
     generation_audit = read_candidate_generation_audit(common_it_dir)
@@ -283,6 +287,9 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
         "gold_missing_after_candidate_generation": 0,
         "dropped_by_limit_count": 0,
         "bbox_nonzero_rows": 0,
+        "prediction_rows": 0,
+        "prediction_true": 0,
+        "prediction_false": 0,
         "passed": False,
         "failure_reasons": "",
     }
@@ -307,6 +314,17 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
             metrics["min_test_true_support_observed"] = min(test_supports)
             metrics["positive_support_by_split"] = json.dumps(split_support, sort_keys=True)
 
+    if os.path.exists(unmatched_path):
+        for data in pd.read_csv(unmatched_path, sep="\t", chunksize=50_000):
+            metrics["prediction_rows"] += len(data)
+            if "match" in data.columns:
+                if data["match"].dtype == bool:
+                    matches = data["match"]
+                else:
+                    matches = data["match"].astype(str).str.lower().isin(["true", "1", "yes"])
+                metrics["prediction_true"] += int(matches.sum())
+                metrics["prediction_false"] += int((~matches).sum())
+
     failures = []
     if not generation_audit:
         failures.append("candidate_generation_audit_missing")
@@ -323,6 +341,8 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
         failures.append("estimated_test_true_support")
     if metric_float(metrics, "gold_missing_after_candidate_generation") > 0:
         failures.append("gold_missing_after_candidate_generation")
+    if gold_split_enabled and metrics["prediction_true"] < min_prediction_true_support:
+        failures.append("prediction_true_support")
     if require_nonzero_bbox and metrics["bbox_nonzero_rows"] == 0:
         failures.append("bbox_overlap")
     metrics["failure_reasons"] = ",".join(failures)

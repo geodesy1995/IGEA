@@ -27,8 +27,11 @@ PG_USER = config.get('postGIS', 'user')
 PG_DB_NAME = config.get('postGIS', 'dbname')
 PG_PORT = config.getint('postGIS', 'port')
 VIEW_NAME = config.get('entity linking', 'view_name')
+BASE_TABLE = config.get('entity linking', 'base_table')
 DATA_SOURCE = config.get('meta', 'kg_source')
 DBPEDIA_SOURCE = config.get('dbpedia scrape', 'dbpedia_source', fallback='en')
+GOLD_SPLIT_ENABLED = config.getboolean('gold split', 'enabled', fallback=False)
+HELDOUT_TABLE = config.get('gold split', 'heldout_table', fallback='heldout_entities')
 MAX_CANDIDATES = config.getint('candidate generation', 'max_candidates')
 DIST_THRESHOLD = config.getint('candidate generation', 'dist_threshold')
 MAX_CANDIDATE_AREA_M2 = config.getfloat('candidate generation', 'max_candidate_area_m2', fallback=50_000_000.0)
@@ -58,13 +61,23 @@ audit_metrics = {
     'dist_threshold': DIST_THRESHOLD,
     'max_candidates': MAX_CANDIDATES,
     'distance_metric': 'geography_meters',
+    'seed_expansion_mode': GOLD_SPLIT_ENABLED,
     'gold_total': 0,
+    'direct_gold_total': 0,
+    'seed_gold_total': 0,
     'gold_within_2500m': 0,
     'gold_outside_2500m': 0,
     'gold_within_threshold': 0,
     'gold_outside_threshold': 0,
     'gold_missing_after_candidate_generation': 0,
     'dropped_by_limit_count': 0,
+    'seed_positive_candidate_count': 0,
+    'seed_negative_train_count': 0,
+    'prediction_candidate_count': 0,
+    'heldout_positive_candidate_count': 0,
+    'heldout_gold_total': 0,
+    'heldout_gold_within_threshold': 0,
+    'heldout_gold_missing_after_candidate_generation': 0,
 }
 gold_distances = []
 
@@ -179,6 +192,19 @@ def linked_value_variants(wiki_id: str) -> list:
     })
 
 
+def record_value(record, key: str):
+    try:
+        return record[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def record_matches(record, wiki_id: str) -> tuple:
+    seed_match = normalize_linked_id(record_value(record, 'wkid')) == wiki_id
+    heldout_match = normalize_linked_id(record_value(record, 'heldout_wkid')) == wiki_id
+    return seed_match, heldout_match
+
+
 def record_key(record) -> str:
     osm_uid = record['osm_uid']
     if osm_uid is not None:
@@ -186,7 +212,7 @@ def record_key(record) -> str:
     return f"{record['osm_type']}:{record['osm_id']}"
 
 
-def point_row(wiki_id, record, match, data, tag_filter):
+def point_row(wiki_id, record, match, seed_match, heldout_match, data, tag_filter):
     return [
         wiki_id,
         record['osm_uid'],
@@ -198,32 +224,49 @@ def point_row(wiki_id, record, match, data, tag_filter):
         record['d_lat'],
         record['d_lon'],
         record['bbox_overlap'],
+        seed_match,
+        heldout_match,
         tag_filter(record['jsonb_strip_nulls']),
     ] + data
 
 
-def merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, tag_filter):
+def merge_direct_gold_rows(wiki_id, distance_records, direct_records, heldout_records, data, tag_filter):
     rows_by_key = {}
     distance_keys = set()
-    is_linked = False
+    seed_keys = set()
+    heldout_candidate_keys = set()
 
     for record in distance_records:
         key = record_key(record)
         distance_keys.add(key)
-        match = normalize_linked_id(record['wkid']) == wiki_id
-        if match:
-            is_linked = True
-        rows_by_key[key] = point_row(wiki_id, record, match, data, tag_filter)
+        seed_match, heldout_match = record_matches(record, wiki_id)
+        if seed_match:
+            seed_keys.add(key)
+        if heldout_match:
+            heldout_candidate_keys.add(key)
+            audit_metrics['heldout_positive_candidate_count'] += 1
+        rows_by_key[key] = {
+            'record': record,
+            'seed_match': seed_match,
+            'heldout_match': heldout_match,
+            'row': point_row(wiki_id, record, seed_match or heldout_match, seed_match, heldout_match, data, tag_filter),
+        }
 
     for record in direct_records:
         key = record_key(record)
-        match = normalize_linked_id(record['wkid']) == wiki_id
-        if match:
-            is_linked = True
-        rows_by_key[key] = point_row(wiki_id, record, match, data, tag_filter)
+        seed_match, heldout_match = record_matches(record, wiki_id)
+        if seed_match:
+            seed_keys.add(key)
+        rows_by_key[key] = {
+            'record': record,
+            'seed_match': seed_match,
+            'heldout_match': heldout_match,
+            'row': point_row(wiki_id, record, seed_match or heldout_match, seed_match, heldout_match, data, tag_filter),
+        }
 
     direct_keys = {record_key(record) for record in direct_records}
     audit_metrics['gold_total'] += len(direct_records)
+    audit_metrics['seed_gold_total'] += len(direct_records)
     for record in direct_records:
         key = record_key(record)
         dist = float(record['dist']) if record['dist'] is not None else 0.0
@@ -245,12 +288,39 @@ def merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, tag_
     # so audit output catches future refactors that break gold preservation.
     missing_after_merge = direct_keys - set(rows_by_key.keys())
     audit_metrics['gold_missing_after_candidate_generation'] += len(missing_after_merge)
-    return is_linked, list(rows_by_key.values())
+
+    heldout_keys = set()
+    for record in heldout_records:
+        key = record_key(record)
+        heldout_keys.add(key)
+        audit_metrics['heldout_gold_total'] += 1
+        if bool(record['heldout_within_threshold']):
+            audit_metrics['heldout_gold_within_threshold'] += 1
+    audit_metrics['heldout_gold_missing_after_candidate_generation'] += len(heldout_keys - heldout_candidate_keys)
+
+    seed_rows = [entry['row'] for entry in rows_by_key.values() if entry['seed_match']]
+    negative_train_rows = [entry['row'] for entry in rows_by_key.values() if not entry['seed_match'] and not entry['heldout_match']]
+    if MAX_TRAIN_FALSE_PER_ENTITY >= 0:
+        negative_train_rows = negative_train_rows[:MAX_TRAIN_FALSE_PER_ENTITY]
+
+    prediction_rows = []
+    for entry in rows_by_key.values():
+        if entry['seed_match']:
+            continue
+        row = list(entry['row'])
+        row[3] = bool(entry['heldout_match'])
+        prediction_rows.append(row)
+
+    audit_metrics['seed_positive_candidate_count'] += len(seed_rows)
+    audit_metrics['seed_negative_train_count'] += len(negative_train_rows)
+    audit_metrics['prediction_candidate_count'] += len(prediction_rows)
+    return seed_rows + negative_train_rows, prediction_rows
 
 
 def write_candidate_generation_audit():
     distances = sorted(gold_distances)
     metrics = dict(audit_metrics)
+    metrics['direct_gold_total'] = int(metrics.get('seed_gold_total', 0)) + int(metrics.get('heldout_gold_total', 0))
     if distances:
         series = pd.Series(distances)
         metrics.update({
@@ -278,17 +348,11 @@ def log_candidate_skip(wiki_id, reason):
         file.write(f'Skipped candidate query for {wiki_id}: {reason}\n')
 
 
-def enqueue_results(is_linked, res, pair_queue, single_queue):
-    if is_linked:
-        if MAX_TRAIN_FALSE_PER_ENTITY >= 0:
-            true_rows = [entry for entry in res if bool(entry[3])]
-            false_rows = [entry for entry in res if not bool(entry[3])][:MAX_TRAIN_FALSE_PER_ENTITY]
-            res = true_rows + false_rows
-        for entry in res:
-            pair_queue.put(entry)
-    else:
-        for entry in res:
-            single_queue.put(entry)
+def enqueue_results(train_rows, prediction_rows, pair_queue, single_queue):
+    for entry in train_rows:
+        pair_queue.put(entry)
+    for entry in prediction_rows:
+        single_queue.put(entry)
 
 
 async def table_has_column(conn, table_name: str, column_name: str) -> bool:
@@ -321,6 +385,19 @@ def consume(stop, queue, filename) -> None:
 
 async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, single_queue=None, threshold=2500, limit=100, osm_uid_expr="osm_id::text", osm_type_expr="'N'"):
     direct_link_expr = direct_link_sql(6)
+    heldout_join = f"LEFT JOIN {HELDOUT_TABLE} h ON h.osm_uid = ({osm_uid_expr})" if GOLD_SPLIT_ENABLED else ""
+    heldout_select = "h.wkid AS heldout_wkid" if GOLD_SPLIT_ENABLED else "NULL::text AS heldout_wkid"
+    heldout_direct_sql = f"""SELECT b.osm_id,
+                     b.osm_uid AS osm_uid,
+                     b.osm_type AS osm_type,
+                     ST_Distance(ST_Transform(b.way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     ST_DWithin(ST_Transform(b.way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) heldout_within_threshold,
+                     h.wkid AS heldout_wkid
+              FROM {BASE_TABLE} b
+              JOIN {HELDOUT_TABLE} h ON h.osm_uid = b.osm_uid
+              WHERE NOT ST_IsEmpty(b.way)
+                AND h.wkid = ANY($4::text[])
+              ORDER BY dist ASC""" if GOLD_SPLIT_ENABLED else None
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
@@ -330,8 +407,9 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
-                     jsonb_strip_nulls(to_jsonb(g)), wkid
+                     jsonb_strip_nulls(to_jsonb(g)), wkid, {heldout_select}
               FROM {VIEW_NAME} g
+              {heldout_join}
               WHERE way && ST_Expand(ST_Transform(ST_GeomFromEWKT($2), 3857), $3::double precision * 2.5)
                 AND ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3)
                 AND NOT ST_IsEmpty(way)
@@ -352,7 +430,7 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
                      ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) direct_within_threshold,
                      ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, 2500) direct_within_2500,
-                     jsonb_strip_nulls(to_jsonb(g)), wkid
+                     jsonb_strip_nulls(to_jsonb(g)), wkid, NULL::text AS heldout_wkid
               FROM {VIEW_NAME} g
               WHERE NOT ST_IsEmpty(way)
                 AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
@@ -360,6 +438,7 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
 
     distance_records = []
     direct_records = []
+    heldout_records = []
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -367,12 +446,14 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
                 async for record in conn.cursor(sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, limit, MAX_CANDIDATE_AREA_M2, wiki_id):
                     distance_records.append(record)
                 direct_records = await conn.fetch(direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, wiki_id, linked_value_variants(wiki_id))
+                if heldout_direct_sql:
+                    heldout_records = await conn.fetch(heldout_direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, linked_value_variants(wiki_id))
     except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as exc:
         log_candidate_skip(wiki_id, f'timeout after {QUERY_TIMEOUT_MS}ms ({type(exc).__name__})')
         return
 
-    is_linked, res = merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, filter_tags_concat)
-    enqueue_results(is_linked, res, pair_queue, single_queue)
+    train_rows, prediction_rows = merge_direct_gold_rows(wiki_id, distance_records, direct_records, heldout_records, data, filter_tags_concat)
+    enqueue_results(train_rows, prediction_rows, pair_queue, single_queue)
 
 
 async def fetch_candidates_for_name(pool, wiki_id, name, data, pair_queue, single_queue=None, limit=100, osm_uid_expr="osm_id::text", osm_type_expr="'N'"):
@@ -381,23 +462,39 @@ async def fetch_candidates_for_name(pool, wiki_id, name, data, pair_queue, singl
               WHERE g.name is not null
               ORDER BY sim DESC LIMIT $2"""
 
-    is_linked = False
-    res = []
+    train_rows = []
+    prediction_rows = []
     async with pool.acquire() as conn:
         async with conn.transaction():
             async for record in conn.cursor(sql, name, limit):
                 match = False
                 id = normalize_linked_id(record['wkid'])
                 if id == wiki_id:
-                    is_linked = True
                     match = True
-                res.append([wiki_id, record['osm_uid'], record['osm_id'], match, record['sim'], filter_tags_concat(record['jsonb_strip_nulls'])] + data)
+                row = [wiki_id, record['osm_uid'], record['osm_id'], match, record['sim'], filter_tags_concat(record['jsonb_strip_nulls'])] + data
+                if match:
+                    train_rows.append(row)
+                else:
+                    prediction_rows.append(row)
 
-    enqueue_results(is_linked, res, pair_queue, single_queue)
+    enqueue_results(train_rows, prediction_rows, pair_queue, single_queue)
 
 
 async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, single_queue=None, threshold=2500, limit=100, osm_uid_expr="osm_id::text", osm_type_expr="'N'"):
     direct_link_expr = direct_link_sql(6)
+    heldout_join = f"LEFT JOIN {HELDOUT_TABLE} h ON h.osm_uid = ({osm_uid_expr})" if GOLD_SPLIT_ENABLED else ""
+    heldout_select = "h.wkid AS heldout_wkid" if GOLD_SPLIT_ENABLED else "NULL::text AS heldout_wkid"
+    heldout_direct_sql = f"""SELECT b.osm_id,
+                     b.osm_uid AS osm_uid,
+                     b.osm_type AS osm_type,
+                     ST_Distance(ST_Transform(b.way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     ST_DWithin(ST_Transform(b.way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) heldout_within_threshold,
+                     h.wkid AS heldout_wkid
+              FROM {BASE_TABLE} b
+              JOIN {HELDOUT_TABLE} h ON h.osm_uid = b.osm_uid
+              WHERE NOT ST_IsEmpty(b.way)
+                AND h.wkid = ANY($4::text[])
+              ORDER BY dist ASC""" if GOLD_SPLIT_ENABLED else None
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
@@ -407,8 +504,9 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
-                     jsonb_strip_nulls(to_jsonb(g)), wkid
+                     jsonb_strip_nulls(to_jsonb(g)), wkid, {heldout_select}
               FROM {VIEW_NAME} g
+              {heldout_join}
               WHERE way && ST_Expand(ST_Transform(ST_GeomFromEWKT($2), 3857), $3::double precision * 2.5)
                 AND ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3)
                 AND NOT ST_IsEmpty(way)
@@ -429,7 +527,7 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
                      ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) direct_within_threshold,
                      ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, 2500) direct_within_2500,
-                     jsonb_strip_nulls(to_jsonb(g)), wkid
+                     jsonb_strip_nulls(to_jsonb(g)), wkid, NULL::text AS heldout_wkid
               FROM {VIEW_NAME} g
               WHERE NOT ST_IsEmpty(way)
                 AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
@@ -437,6 +535,7 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
 
     distance_records = []
     direct_records = []
+    heldout_records = []
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -444,12 +543,14 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
                 async for record in conn.cursor(sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, limit, MAX_CANDIDATE_AREA_M2, wiki_id):
                     distance_records.append(record)
                 direct_records = await conn.fetch(direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, wiki_id, linked_value_variants(wiki_id))
+                if heldout_direct_sql:
+                    heldout_records = await conn.fetch(heldout_direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, linked_value_variants(wiki_id))
     except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as exc:
         log_candidate_skip(wiki_id, f'timeout after {QUERY_TIMEOUT_MS}ms ({type(exc).__name__})')
         return
 
-    is_linked, res = merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, filter_tags_json)
-    enqueue_results(is_linked, res, pair_queue, single_queue)
+    train_rows, prediction_rows = merge_direct_gold_rows(wiki_id, distance_records, direct_records, heldout_records, data, filter_tags_json)
+    enqueue_results(train_rows, prediction_rows, pair_queue, single_queue)
 
 
 async def main():
@@ -507,7 +608,7 @@ async def main():
     if not USE_LEGACY_EMBEDDINGS:
         if GENERATION_METHOD == 'distance':
             col_mask = [c not in ['wkid', 'location'] for c in wiki_data.columns]
-            header_names = ['wkid', 'osm_uid', 'osm_id', 'match', 'dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon', 'bbox_overlap', 'tags'] + list(wiki_data.columns[col_mask])
+            header_names = ['wkid', 'osm_uid', 'osm_id', 'match', 'dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon', 'bbox_overlap', 'seed_gold', 'heldout_gold', 'tags'] + list(wiki_data.columns[col_mask])
             match_queue.put(header_names)
             single_queue.put(header_names)
             for index, row in wiki_data.iterrows():
@@ -521,7 +622,7 @@ async def main():
                 tasks.append(fetch_candidates_for_name(pool, row['wkid'], row['name'], list(row[col_mask]), match_queue, single_queue, MAX_CANDIDATES, osm_uid_expr, osm_type_expr))
     else:
         col_mask = [c not in ['wkid', 'location', 'name'] for c in wiki_data.columns]
-        header_names = ['wkid', 'osm_uid', 'osm_id', 'match', 'dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon', 'bbox_overlap', 'tags'] + list(wiki_data.columns[col_mask])
+        header_names = ['wkid', 'osm_uid', 'osm_id', 'match', 'dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon', 'bbox_overlap', 'seed_gold', 'heldout_gold', 'tags'] + list(wiki_data.columns[col_mask])
         match_queue.put(header_names)
         single_queue.put(header_names)
         for index, row in wiki_data.iterrows():

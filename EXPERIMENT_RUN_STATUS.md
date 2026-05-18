@@ -114,17 +114,17 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 
 ## Implemented Normalization Changes
 
-- DBpedia entity collection supports `entity_source=osm_linked`.
+- DBpedia main configs use `entity_source=country`; the old `osm_linked` collection path is retained only for diagnostic compatibility.
 - OSM `wikipedia` tags are normalized to DBpedia resource titles.
 - DBpedia entities without DBpedia coordinates are excluded from the main KG dump.
-- Wikidata entity collection now supports `entity_source=osm_linked` using OSM `wikidata=Q...` tags as the seed entity list.
+- Wikidata main configs use `entity_source=country` with Ireland `Q27`; OSM `wikidata=Q...` tags are seed/evaluation labels only.
 - `readRDFWikidata.py` now preserves OSM type prefixes for node/way/relation IDs and fixes batched `VALUES` queries for QIDs.
 - OSM coordinate fallback is not used for KG coordinates.
 - `ireland_features` includes nodes, ways, and selected relations with geometry.
 - Candidate rows track `osm_uid` so nodes, ways, and relations do not collide on numeric `osm_id`.
 - Candidate text now excludes `wkid`, `confidence`, and `iteration` to avoid label/prediction metadata leakage.
 - Main scientific configs now use `dist_threshold=2500` and `max_candidates=100`; automatic 25 km retry expansion is disabled.
-- Direct OSM `wikipedia`/`wikidata` gold positives are preserved even when they fall outside the 2.5 km ordinary candidate radius or outside the top 100 ordinary candidates.
+- Seed OSM `wikipedia`/`wikidata` positives are preserved for training. Heldout direct links are hidden from the seed table and used to evaluate unlinked/heldout prediction coverage.
 - Candidate generation writes `candidate_generation_audit.csv`; the cached runner merges its gold-preservation metrics and split-aware positive support into `candidate_audit.csv`.
 - The cached runner rejects reused common artifacts when their generation audit is missing or their `dist_threshold` / `max_candidates` do not match the current config.
 - `bbox_overlap` is still generated as a diagnostic column but has been removed from model inputs and default ablation variants.
@@ -137,11 +137,13 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 
 ## Blocked / Not Final Yet
 
-- Wikidata may still be limited by Wikidata Query Service rate limits, but it now has the same OSM-linked path as DBpedia.
+- Wikidata may still be limited by Wikidata Query Service rate limits. It is not part of the current DBpedia-first execution plan.
 - The previous CPU full DBpedia ablation matrix was manually cancelled after `dbpedia_original_seed42` completed and `dbpedia_original_seed43` had started.
 - The later GPU DBpedia run under `data/ablation_dbpedia_osm_linked_gpu` used the exploratory 10 km / 200-candidate setting and was manually cancelled. Do not use it as the paper main result.
 - The later 2.5 km / max-100 GRL GPU run under `data/ablation_dbpedia_osm_linked_2500m_max100_grl_gpu` was manually cancelled because `original` still used `dist` as a model input. Treat it as diagnostic only; its `original` rows are actually distance-only.
-- The corrected main DBpedia setting defines `original` as no spatial feature concat, `distance_only` as `dist`, `all_spatial` as `dist + bearing + offset`, and leave-one-out variants `no_bearing`, `no_offset`, `no_distance`. Main reruns use seeds `42,43,44`.
+- The corrected main DBpedia setting defines `original` as no spatial feature concat, `distance_only` as `dist`, `all_spatial` as `dist + bearing + offset`, and leave-one-out variants `no_bearing`, `no_offset`, `no_distance`. Main reruns use seeds `42,43`.
+- The old OSM-linked KG setup is methodologically invalid for IGEA-style link expansion. Current configs collect Ireland KG entities independently with `entity_source=country`; OSM `wikipedia` / `wikidata` links are split into seed links and heldout labels only.
+- Distance-bin / near-field experiments have been removed from the current plan. The result focus is spatial context influence under one bounded candidate policy: geodesic `dist_threshold=2500` and `max_candidates=100`.
 - GPU TensorFlow is available through Docker. Smoke test result: TensorFlow 2.12.0, `built_with_cuda=True`, `GPU:0` detected on RTX 4060.
 - The current `original`/`all_spatial` smoke scores are leakage-invalid. They should stay in the record only as a pipeline validation run.
 
@@ -173,10 +175,10 @@ Generate NCA vocabulary from Ireland PBF:
 venv\Scripts\python scripts\build_nca_vocab.py data\raw\ireland-and-northern-ireland-latest.osm.pbf --input-format pbf --link-keys both --tag-output config\osmTagKeyWiki.csv --key-output config\osmKeyWiki.csv
 ```
 
-Regenerate OSM-linked DBpedia common artifacts:
+Regenerate DBpedia common artifacts with independent Ireland KG entities and seed/heldout OSM labels:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --variants original --seeds 42 --output-root .\data\ablation_dbpedia_osm_linked
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --variants original --seeds 42 --output-root .\data\ablation_dbpedia_irelandkg_seed80_2500m_max100
 ```
 
 Run GPU smoke:
@@ -185,22 +187,22 @@ Run GPU smoke:
 powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
 ```
 
-Run OSM-linked DBpedia matrix on GPU:
+Run DBpedia matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_original_clean_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43,44"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_irelandkg_seed80_2500m_max100_geodesic_2seed_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43"
 ```
 
-Run OSM-linked Wikidata matrix on GPU:
+Run Wikidata matrix on GPU when needed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_irelandkg_seed80_2500m_max100_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43"
 ```
 
-Reuse the current common artifacts for a fast smoke:
+Reuse matching country-KG common artifacts for a fast smoke:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_smoke_ireland_dbpedia.ini --variants original,all_spatial --seeds 42 --output-root .\data\ablation_dbpedia_osm_linked_smoke_variants_fast --reuse-common-dir .\data\ablation_dbpedia_osm_linked_smoke\20260517-230315\_common\it_1
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_smoke_ireland_dbpedia.ini --variants original,all_spatial --seeds 42 --output-root .\data\ablation_dbpedia_irelandkg_smoke_variants_fast --reuse-common-dir .\data\ablation_dbpedia_irelandkg_seed80_2500m_max100\YYYYMMDD-HHMMSS\_common\it_1
 ```
 
 Summarize results:

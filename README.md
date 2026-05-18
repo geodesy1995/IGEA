@@ -359,22 +359,32 @@ If Wikidata Query Service is temporarily rate-limiting requests, run the DBpedia
 venv\Scripts\python runExperiment.py config\config_smoke_ireland_dbpedia.ini
 ```
 
-The DBpedia configs use `entity_source=osm_linked`. Instead of relying only on `dbo:country`, OSM `wikipedia` tags are normalized to DBpedia resource titles and queried in batches. DBpedia entities without DBpedia coordinates are excluded from the main run; OSM coordinates are not used as KG-coordinate fallback.
+The DBpedia main configs use `entity_source=country`: DBpedia entities are collected independently from the Ireland KG query, not from OSM links. OSM `wikipedia` links are used only as seed/evaluation labels.
 
-The Wikidata configs also support `entity_source=osm_linked`. In this mode, OSM `wikidata=Q...` tags seed the KG entity list directly, and `scrapeWikiData.py` queries those QIDs for Wikidata coordinates and properties. This avoids the earlier Ireland-only `P17=Q27` country/class bottleneck and makes Wikidata comparable to the OSM-linked DBpedia setup.
+The Wikidata main configs likewise use `entity_source=country` with Ireland `Q27`. OSM `wikidata=Q...` links are not used to define the KG entity list; they are used only as seed/evaluation labels.
 
-Candidate generation has the following safeguards for the OSM-linked DBpedia setup:
+The experiment uses a heldout-link setup to evaluate IGEA-style expansion to unlinked OSM candidates:
 
 | option | use |
 | ------ | --- |
-|dist_threshold|Main scientific configs use a 2,500 m ordinary nearest-neighbor radius.|
+|`[gold split].enabled=True`|Split direct OSM links before candidate generation.|
+|`seed_fraction=0.8`|Use 80% of linked KG ids as seed links for schema/entity bootstrapping.|
+|`heldout_table=heldout_entities`|Store the remaining direct links as hidden labels. They are not inserted into the seed prediction table.|
+|`prediction_after_verifier_f1`|Primary unlinked/heldout expansion metric from `predicted entity matches.tsv` / metadata.|
+
+Candidate generation has the following safeguards for the Ireland KG setup:
+
+| option | use |
+| ------ | --- |
+|dist_threshold|Main scientific configs use a 2,500 m geodesic nearest-neighbor radius.|
 |max_candidates|Main scientific configs keep the nearest 100 ordinary candidates per KG entity.|
-|direct gold preservation|Direct OSM `wikipedia`/`wikidata` positives are merged back even when they are outside 2,500 m or outside the top 100 ordinary candidates.|
-|max_candidate_area_m2|Exclude very large polygons from ordinary nearest-neighbor candidates unless they are the direct OSM-DBpedia linked feature.|
-|max_train_false_per_entity|Keep all positive pairs, but cap false training pairs per KG entity to control class imbalance and runtime.|
+|seed gold preservation|Seed positives are merged into `train pairs.tsv` so the model has supervised links.|
+|heldout gold audit|Hidden positives are reported through heldout candidate coverage metrics and used to evaluate prediction on unlinked candidates.|
+|max_candidate_area_m2|Exclude very large polygons from ordinary nearest-neighbor candidates unless they are seed positives.|
+|max_train_false_per_entity|Keep all seed positive pairs, but cap false training pairs per KG entity to control class imbalance and runtime.|
 |query_timeout_ms|Set a PostGIS statement timeout per candidate query so one slow entity cannot stall the whole run.|
 
-The cached runner writes `coverage_report.csv`, `candidate_generation_audit.csv`, and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, split-aware test true support of at least 20, and zero missing direct gold positives. Reused common artifacts must include a matching `candidate_generation_audit.csv`; stale 10 km / 200-candidate artifacts fail audit and must be regenerated.
+The cached runner writes `coverage_report.csv`, `candidate_generation_audit.csv`, and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, split-aware test true support of at least 20, at least 20 heldout positives in the bounded prediction candidate set, and zero missing seed positives. `candidate_generation_audit.csv` reports seed, heldout, and ordinary prediction candidate counts so unlinked expansion size stays visible. Reused common artifacts must include a matching `candidate_generation_audit.csv`; stale OSM-linked or 10 km / 200-candidate artifacts fail audit and must be regenerated.
 
 Leakage controls are required for scientific runs:
 
@@ -404,13 +414,13 @@ venv\Scripts\python scripts\run_ablation_matrix.py config\config_ireland_wikidat
 For DBpedia or Wikidata runs, use the cached runner after one common run has produced NCA/KG/candidate artifacts. This avoids repeating slow KG/SPARQL collection for every spatial variant:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_osm_linked_2500m_max100
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_irelandkg_seed80_2500m_max100
 ```
 
 For Wikidata:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_wikidata.ini --output-root .\data\ablation_wikidata_osm_linked_2500m_max100
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_wikidata.ini --output-root .\data\ablation_wikidata_irelandkg_seed80_2500m_max100
 ```
 
 ### GPU execution on Windows
@@ -426,13 +436,13 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
 Run the cached DBpedia matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_original_clean_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43,44"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_irelandkg_seed80_2500m_max100_geodesic_2seed_grl_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43"
 ```
 
 Run the cached Wikidata matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_2500m_max100_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_irelandkg_seed80_2500m_max100_gpu --variants original,distance_only,all_spatial,no_bearing,no_offset,no_distance --seeds 42,43"
 ```
 
 The GPU configs use `host.docker.internal` for PostGIS because `localhost` inside the GPU container refers to the container itself. Start PostGIS with `docker compose up -d postgis` before running the GPU experiment.
@@ -443,11 +453,7 @@ To reuse common artifacts from an earlier matrix directory:
 venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_cached_scaled --reuse-common-dir .\data\ablation_dbpedia_cached\20260517-110353\_common\it_1
 ```
 
-Current OSM-linked DBpedia smoke artifacts can be reused with:
-
-```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_smoke_ireland_dbpedia.ini --variants original,all_spatial --seeds 42 --output-root .\data\ablation_dbpedia_osm_linked_smoke_variants_fast --reuse-common-dir .\data\ablation_dbpedia_osm_linked_smoke\20260517-230315\_common\it_1
-```
+Older OSM-linked smoke artifacts are diagnostic only and should not be reused for the main seed-expansion result. If you reuse common artifacts, they must come from a run with `entity_source=country`, `[gold split].enabled=True`, and matching `dist_threshold` / `max_candidates`.
 
 Default variants:
 
@@ -469,13 +475,13 @@ After runs complete, summarize the result folders:
 venv\Scripts\python scripts\summarize_ablation_results.py .\data\ablation_matrix --output ablation_summary.csv
 ```
 
-The summary table reports precision, recall, F1, delta_f1_vs_original, predicted match counts, and spatial preprocessing metadata. Use delta_f1_vs_original as the primary indicator for which spatial cue contributes most over the original IGEA baseline. The dummy-gate variant should be interpreted through verifier_selected_count and llm verifier log.tsv, not as an LLM quality result.
+The summary table reports both seed-pair classifier metrics and heldout/unlinked prediction metrics. Use `delta_prediction_f1_vs_original_mean` as the primary indicator for which spatial cue contributes most to IGEA-style link expansion. The class-report `delta_f1_vs_original_mean` is diagnostic for the supervised pair classifier, not the final expansion result.
 
 After the leakage-free full run completes, run the OpenAI verifier follow-up without restarting the full ablation matrix:
 
 ```powershell
 $env:OPENAI_API_KEY="sk-..."
-venv\Scripts\python scripts\run_openai_verifier_followup.py config\config_ireland_dbpedia.ini --source-matrix .\data\ablation_dbpedia_osm_linked_full_leakage_free\20260518-071747 --output-root .\data\llm_verifier_followup_openai --margins 0.03,0.05,0.10 --seeds 42,43,44,45,46
+venv\Scripts\python scripts\run_openai_verifier_followup.py config\config_ireland_dbpedia.ini --source-matrix .\data\ablation_dbpedia_irelandkg_seed80_2500m_max100_geodesic_2seed_grl_gpu\YYYYMMDD-HHMMSS --output-root .\data\llm_verifier_followup_openai --margins 0.03,0.05,0.10 --seeds 42,43
 ```
 
 For a cost-safe smoke test, add `--max-calls 5`. The follow-up copies completed `all_spatial` artifacts, sets `write_predictions_to_db=False`, and writes verifier-adjusted prediction metrics to metadata and `llm verifier log.tsv`.

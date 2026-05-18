@@ -245,6 +245,8 @@ def write_empty_predictions(reason):
         'wkid',
         'osm_uid',
         'osm_id',
+        'match',
+        'dist',
         'probability',
         'prediction',
         'prediction_before_verifier',
@@ -409,6 +411,13 @@ if 'osm_uid' in data.columns:
 else:
     all_prediction_pairs['osm_uid'] = data['osm_id'].astype(str)
 all_prediction_pairs['osm_id'] = data['osm_id']
+if 'match' in data.columns:
+    all_prediction_pairs['match'] = parse_bool_series(data['match'])
+else:
+    all_prediction_pairs['match'] = False
+for column in ['dist', 'bearing_sin', 'bearing_cos', 'd_lat', 'd_lon', 'seed_gold', 'heldout_gold']:
+    if column in data.columns:
+        all_prediction_pairs[column] = data[column]
 all_prediction_pairs['probability'] = probabilities
 all_prediction_pairs['prediction'] = prediction
 all_prediction_pairs['prediction_before_verifier'] = prediction_before_verifier
