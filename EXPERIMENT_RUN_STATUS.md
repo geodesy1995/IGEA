@@ -18,6 +18,7 @@
 - `scripts/run_cached_ablation_matrix.py` can reuse DBpedia or Wikidata NCA/KG/candidate artifacts across ablation variants and seeds.
 - `scripts/summarize_ablation_results.py` writes aggregate and raw ablation summaries.
 - `scripts/cap_candidate_train_pairs.py` keeps all positive pairs and caps false pairs per KG entity for runtime/class balance.
+- `scripts/schemaMatch.py` uses a gradient-reversal NCA adversarial branch with standard binary cross-entropy, replacing the unstable negative-BCE source loss.
 
 ## Current Data State
 

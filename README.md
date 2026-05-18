@@ -59,6 +59,7 @@ nca contains information necessary for the schema alignment part of the linking 
 |latent_space|dimension of the latent space used in schema alignment|
 |num_epochs|number of epochs to train for during schema alignment|
 |train_verbose| how much information to display during schema alignment training. Choose from: 0, 1, 2|
+|adversarial_lambda|gradient reversal strength for the NCA source discriminator. The discriminator uses standard binary cross-entropy while the shared encoder receives reversed gradients.|
 
 ### dbpedia scrape  
 dbpedia scrape contains information defining how and which information to collect from dbpedia  
@@ -257,7 +258,7 @@ provider=dummy
 
 The current verifier is intentionally dummy-first. It allows the low-margin gate, logging format, and cost proxy to be evaluated reproducibly before connecting a paid or local LLM. Since the dummy verifier returns unsure, it does not change neural predictions.
 
-Spatial numeric inputs are normalized before entering the neural matcher. The `dist` column is transformed with `log1p`, then a `StandardScaler` is fit on the training split and saved as `spatial scaler.sav`. Prediction uses the same saved scaler. This keeps mixed-scale features such as distance, bearing, coordinate offsets, and bbox overlap comparable across ablation variants.
+Spatial numeric inputs are normalized before entering the neural matcher. The `dist` column is transformed with `log1p`, then a `StandardScaler` is fit on the training split and saved as `spatial scaler.sav`. Prediction uses the same saved scaler. This keeps mixed-scale features such as distance, bearing, and coordinate offsets comparable across ablation variants.
 
 ### Local Docker runtime
 

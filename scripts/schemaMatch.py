@@ -4,9 +4,8 @@ from keras.utils import pad_sequences
 from skmultilearn.problem_transform import LabelPowerset
 from imblearn.over_sampling import RandomOverSampler
 from keras.models import Model
-from keras.losses import binary_crossentropy
 from keras.optimizers import Adam
-from keras.layers import Input, Dense
+from keras.layers import Input, Dense, Layer
 import numpy as np
 import tensorflow as tf
 import random as rn
@@ -27,6 +26,7 @@ PREDICTION_THRESHOLD = config.getfloat('nca', 'prediction_threshold')
 LATENT_SPACE = config.getint('nca', 'latent_space')
 NUM_EPOCHS = config.getint('nca', 'num_epochs')
 TRAIN_VERBOSE = config.getint('nca', 'train_verbose')
+ADVERSARIAL_LAMBDA = config.getfloat('nca', 'adversarial_lambda', fallback=1.0)
 TESTRUN = config.getboolean('misc', 'testrun')
 
 if TESTRUN:
@@ -142,10 +142,29 @@ def transform_input(osm_train, osm_test, wiki_train, wiki_test, y_train, y_test)
 
 x_train, y_train, adverse_train, x_test, y_test, adverse_test = transform_input(osm_train, osm_test, wiki_train, wiki_test, y_train, y_test)
 
-#loss for adversarial component
-def maxLoss(y_true, y_pred):
-    return -1.0 * binary_crossentropy(y_true, y_pred)
 
+class GradientReversal(Layer):
+    """Identity in the forward pass, -lambda scaled gradient in the backward pass."""
+
+    def __init__(self, lambda_=1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.lambda_ = float(lambda_)
+
+    def call(self, inputs):
+        lambda_ = self.lambda_
+
+        @tf.custom_gradient
+        def reverse_gradient(x):
+            def grad(dy):
+                return -lambda_ * dy
+            return x, grad
+
+        return reverse_gradient(inputs)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({'lambda_': self.lambda_})
+        return config
 
 
 class SchemaModel:
@@ -156,9 +175,15 @@ class SchemaModel:
         
         losses = {
                 "class": 'binary_crossentropy',
-                "adverse": maxLoss,
+                "adverse": 'binary_crossentropy',
                 }
+        loss_weights = {
+                "class": 1.0,
+                "adverse": 1.0,
+                }
+        print(f'-adversarial objective: gradient reversal + binary_crossentropy (lambda={ADVERSARIAL_LAMBDA})')
         self.model.compile(loss=losses,
+                                   loss_weights=loss_weights,
                                    optimizer=optimizer,
                                    metrics=['accuracy'])
         
@@ -175,9 +200,10 @@ class SchemaModel:
         
         classifier = Dense(no_outputs, activation='sigmoid', name = 'class')(fc_2)
         
-        # Binary source discriminator: OSM rows are labeled 1, KG rows are labeled 0.
-        # A one-unit softmax always returns 1 and makes the adversarial BCE explode.
-        adverse= Dense(1, activation='sigmoid', name = 'adverse')(latent_rep)
+        # Domain-adversarial branch: discriminator minimizes BCE, while the
+        # shared encoder receives reversed gradients to remove source cues.
+        reversed_latent = GradientReversal(ADVERSARIAL_LAMBDA, name='gradient_reversal')(latent_rep)
+        adverse= Dense(1, activation='sigmoid', name = 'adverse')(reversed_latent)
         
         
         model = Model(inputs, [classifier, adverse])
