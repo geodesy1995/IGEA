@@ -8,6 +8,7 @@ import asyncio
 import asyncpg
 import re
 import csv
+import time
 
 DATA_DIR = sys.argv[1]
 CONFIG_PATH = sys.argv[2]
@@ -31,6 +32,11 @@ PG_USER = config.get('postGIS', 'user', fallback='user')
 PG_DB_NAME = config.get('postGIS', 'dbname', fallback='db')
 PG_PORT = config.getint('postGIS', 'port', fallback=5432)
 BASE_TABLE = config.get('entity linking', 'base_table', fallback='')
+SPARQL_BATCH_SIZE = config.getint('wikidata scrape', 'batch_size', fallback=500)
+PROPERTY_BATCH_SIZE = config.getint('wikidata scrape', 'property_batch_size', fallback=250)
+REQUEST_SLEEP_SECONDS = config.getfloat('wikidata scrape', 'request_sleep_seconds', fallback=0.75)
+MAX_RETRIES = config.getint('wikidata scrape', 'max_retries', fallback=4)
+RETRY_BACKOFF_SECONDS = config.getfloat('wikidata scrape', 'retry_backoff_seconds', fallback=10.0)
 
 sparql = SPARQLWrapper("https://query.wikidata.org/sparql",
                        returnFormat='json',
@@ -38,12 +44,15 @@ sparql = SPARQLWrapper("https://query.wikidata.org/sparql",
 sparql.setTimeout(config.getint('wikidata scrape', 'timeout_seconds', fallback=120))
 
 endpoint_error_count = 0
+last_request_time = 0.0
 coverage_metrics = {
     'entity_source': ENTITY_SOURCE,
     'scrape_values': ','.join(SCRAPE_MODES),
     'osm_linked_qids': 0,
     'wikidata_coordinate_entities': 0,
     'endpoint_error_count': 0,
+    'sparql_batch_size': SPARQL_BATCH_SIZE,
+    'request_sleep_seconds': REQUEST_SLEEP_SECONDS,
 }
 
 linked_classes = []
@@ -71,13 +80,28 @@ def record_endpoint_error(context: str, exc: Exception) -> None:
     print(f'An error occurred {context}: {repr(exc)}')
 
 
+def throttle_request() -> None:
+    global last_request_time
+    elapsed = time.monotonic() - last_request_time
+    if elapsed < REQUEST_SLEEP_SECONDS:
+        time.sleep(REQUEST_SLEEP_SECONDS - elapsed)
+    last_request_time = time.monotonic()
+
+
 def sparql_query(query: str, context: str):
-    try:
-        sparql.setQuery(query)
-        return sparql.query().convert()
-    except Exception as exc:
-        record_endpoint_error(context, exc)
-        return None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            throttle_request()
+            sparql.setQuery(query)
+            return sparql.query().convert()
+        except Exception as exc:
+            if attempt < MAX_RETRIES:
+                sleep_for = RETRY_BACKOFF_SECONDS * attempt
+                print(f'Retrying {context} after {repr(exc)} in {sleep_for:.1f}s')
+                time.sleep(sleep_for)
+            else:
+                record_endpoint_error(context, exc)
+    return None
 
 
 async def collect_osm_wikidata_qids() -> list:
@@ -124,7 +148,7 @@ SELECT ?item ?location (SAMPLE(?type) AS ?type) WHERE {
 """
 
     entities = {}
-    step_size = 300
+    step_size = SPARQL_BATCH_SIZE
     with tqdm(total=len(qids), desc='-Gathering OSM-linked Wikidata entities', miniters=1) as pbar:
         i = 0
         while i < len(qids):
@@ -208,7 +232,7 @@ if 'popularity' in SCRAPE_MODES:
         v.update({'pop': 0})
 
     i = 0
-    step_size = 300
+    step_size = SPARQL_BATCH_SIZE
     with tqdm(total=len(entities), desc='-updating popularity') as pbar:
         for i, batch in entity_batches(entities, step_size):
             try:
@@ -242,7 +266,7 @@ if 'type labels' in SCRAPE_MODES:
         v.update({'labels': ''})
 
     i = 0
-    step_size = 300
+    step_size = SPARQL_BATCH_SIZE
 
     with tqdm(total=len(entities), desc='-updating labels', miniters=1) as pbar:
         for i, batch in entity_batches(entities, step_size):
@@ -273,7 +297,7 @@ if 'name' in SCRAPE_MODES:
         v.update({'name': ''})
 
     i = 0
-    step_size = 300
+    step_size = SPARQL_BATCH_SIZE
 
     with tqdm(total=len(entities), desc='-updating names', miniters=1) as pbar:
         for i, batch in entity_batches(entities, step_size):
@@ -311,7 +335,7 @@ if 'full properties' in SCRAPE_MODES:
         v.update({'properties': ''})
 
     i = 0
-    step_size = 250
+    step_size = PROPERTY_BATCH_SIZE
 
     with tqdm(total=len(entities), desc='-updating properties', miniters=1) as pbar:
         for i, batch in entity_batches(entities, step_size):
@@ -385,6 +409,11 @@ def write_to_file(entity_dict: dict, filename: str) -> None:
     table = pa.Table.from_pylist(data_list)
     with open(filename, 'wb') as file:
         pq.write_table(table, file)
+
+if not entities:
+    write_classes(entities)
+    write_coverage_report()
+    raise RuntimeError('No Wikidata entities with coordinates were collected; check WDQS rate limits or connectivity.')
 
 write_classes(entities)
 write_coverage_report()
