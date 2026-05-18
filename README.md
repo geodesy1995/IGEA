@@ -364,11 +364,14 @@ Candidate generation has the following safeguards for the OSM-linked DBpedia set
 
 | option | use |
 | ------ | --- |
+|dist_threshold|Main scientific configs use a 2,500 m ordinary nearest-neighbor radius.|
+|max_candidates|Main scientific configs keep the nearest 100 ordinary candidates per KG entity.|
+|direct gold preservation|Direct OSM `wikipedia`/`wikidata` positives are merged back even when they are outside 2,500 m or outside the top 100 ordinary candidates.|
 |max_candidate_area_m2|Exclude very large polygons from ordinary nearest-neighbor candidates unless they are the direct OSM-DBpedia linked feature.|
 |max_train_false_per_entity|Keep all positive pairs, but cap false training pairs per KG entity to control class imbalance and runtime.|
 |query_timeout_ms|Set a PostGIS statement timeout per candidate query so one slow entity cannot stall the whole run.|
 
-The cached runner writes `coverage_report.csv` and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, estimated test true support of at least 20, and non-zero `bbox_overlap` support for topology variants.
+The cached runner writes `coverage_report.csv`, `candidate_generation_audit.csv`, and `candidate_audit.csv` before full variants run. The default gate requires at least 100 true train pairs, at least 2,000 train rows, split-aware test true support of at least 20, zero missing direct gold positives, and non-zero `bbox_overlap` support for topology variants. Reused common artifacts must include a matching `candidate_generation_audit.csv`; stale 10 km / 200-candidate artifacts fail audit and must be regenerated.
 
 Leakage controls are required for scientific runs:
 
@@ -398,13 +401,13 @@ venv\Scripts\python scripts\run_ablation_matrix.py config\config_ireland_wikidat
 For DBpedia or Wikidata runs, use the cached runner after one common run has produced NCA/KG/candidate artifacts. This avoids repeating slow KG/SPARQL collection for every spatial variant:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_cached
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_dbpedia.ini --output-root .\data\ablation_dbpedia_osm_linked_2500m_max100
 ```
 
 For Wikidata:
 
 ```powershell
-venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_wikidata.ini --output-root .\data\ablation_wikidata_osm_linked
+venv\Scripts\python scripts\run_cached_ablation_matrix.py config\config_ireland_wikidata.ini --output-root .\data\ablation_wikidata_osm_linked_2500m_max100
 ```
 
 ### GPU execution on Windows
@@ -420,13 +423,13 @@ powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -Build
 Run the cached DBpedia matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_dbpedia_gpu.ini --output-root ./data/ablation_dbpedia_osm_linked_2500m_max100_gpu --seeds 42,43,44,45,46"
 ```
 
 Run the cached Wikidata matrix on GPU:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_gpu --seeds 42,43,44,45,46"
+powershell -ExecutionPolicy Bypass -File scripts\run_gpu_docker.ps1 -CommandLine "python scripts/run_cached_ablation_matrix.py config/config_ireland_wikidata_gpu.ini --output-root ./data/ablation_wikidata_osm_linked_2500m_max100_gpu --seeds 42,43,44,45,46"
 ```
 
 The GPU configs use `host.docker.internal` for PostGIS because `localhost` inside the GPU container refers to the container itself. Start PostGIS with `docker compose up -d postgis` before running the GPU experiment.

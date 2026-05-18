@@ -11,6 +11,7 @@ from json import dumps, loads
 from queue import Queue
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
 from dbpedia_utils import normalize_wikipedia_tag
 from experiment_config import TRAIN_PAIRS_FILENAME, UNMATCHED_PAIRS_FILENAME
 
@@ -36,6 +37,7 @@ QUERY_TIMEOUT_MS = config.getint('candidate generation', 'query_timeout_ms', fal
 GENERATION_METHOD = config.get('candidate generation', 'method')
 USE_LEGACY_EMBEDDINGS = config.getboolean('legacy', 'use_legacy_embeddings')
 LOG_FILENAME = os.path.join(DATA_DIR, 'generate_candidates_log.txt')
+AUDIT_FILENAME = os.path.join(DATA_DIR, 'candidate_generation_audit.csv')
 MATCH_FILENAME = os.path.join(DATA_DIR, TRAIN_PAIRS_FILENAME)
 NO_MATCH_FILENAME = os.path.join(DATA_DIR, UNMATCHED_PAIRS_FILENAME)
 DATA_PATH = os.path.join(DATA_DIR, 'wikidata dump.parquet')
@@ -50,6 +52,20 @@ wiki_data = pd.read_parquet(DATA_PATH, engine='pyarrow')
 if TESTRUN:
     print(f'Restricting candidate generation to {LIMIT} entities')
     wiki_data = wiki_data[:LIMIT]
+
+
+audit_metrics = {
+    'dist_threshold': DIST_THRESHOLD,
+    'max_candidates': MAX_CANDIDATES,
+    'gold_total': 0,
+    'gold_within_2500m': 0,
+    'gold_outside_2500m': 0,
+    'gold_within_threshold': 0,
+    'gold_outside_threshold': 0,
+    'gold_missing_after_candidate_generation': 0,
+    'dropped_by_limit_count': 0,
+}
+gold_distances = []
 
 
 def normalize_json_object(data):
@@ -115,7 +131,7 @@ def normalize_linked_id(value):
     return value
 
 
-def dbpedia_direct_link_sql() -> str:
+def dbpedia_direct_link_sql(parameter_index: int = 6) -> str:
     source = DBPEDIA_SOURCE.replace("'", "''")
     return f"""
                      REPLACE(
@@ -127,7 +143,133 @@ def dbpedia_direct_link_sql() -> str:
                          ),
                          ' ',
                          '_'
-                     ) = $6"""
+                     ) = ${parameter_index}"""
+
+
+def direct_link_sql(parameter_index: int = 6) -> str:
+    if DATA_SOURCE == 'dbpedia':
+        return dbpedia_direct_link_sql(parameter_index)
+    return f"COALESCE(g.wkid, '') = ${parameter_index}"
+
+
+def direct_link_exact_sql(parameter_index: int) -> str:
+    return f"COALESCE(g.wkid, '') = ANY(${parameter_index}::text[])"
+
+
+def linked_value_variants(wiki_id: str) -> list:
+    if DATA_SOURCE != 'dbpedia':
+        return [wiki_id]
+    title = str(wiki_id)
+    title_space = title.replace('_', ' ')
+    encoded_title = quote(title, safe='()_,-.')
+    encoded_space = quote(title_space, safe='()_,-.')
+    source = DBPEDIA_SOURCE
+    return sorted({
+        title,
+        title_space,
+        f'{source}:{title}',
+        f'{source}:{title_space}',
+        f'http://{source}.wikipedia.org/wiki/{title}',
+        f'https://{source}.wikipedia.org/wiki/{title}',
+        f'http://{source}.wikipedia.org/wiki/{encoded_title}',
+        f'https://{source}.wikipedia.org/wiki/{encoded_title}',
+        f'http://{source}.wikipedia.org/wiki/{encoded_space}',
+        f'https://{source}.wikipedia.org/wiki/{encoded_space}',
+    })
+
+
+def record_key(record) -> str:
+    osm_uid = record['osm_uid']
+    if osm_uid is not None:
+        return str(osm_uid)
+    return f"{record['osm_type']}:{record['osm_id']}"
+
+
+def point_row(wiki_id, record, match, data, tag_filter):
+    return [
+        wiki_id,
+        record['osm_uid'],
+        record['osm_id'],
+        match,
+        record['dist'],
+        record['bearing_sin'],
+        record['bearing_cos'],
+        record['d_lat'],
+        record['d_lon'],
+        record['bbox_overlap'],
+        tag_filter(record['jsonb_strip_nulls']),
+    ] + data
+
+
+def merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, tag_filter):
+    rows_by_key = {}
+    distance_keys = set()
+    is_linked = False
+
+    for record in distance_records:
+        key = record_key(record)
+        distance_keys.add(key)
+        match = normalize_linked_id(record['wkid']) == wiki_id
+        if match:
+            is_linked = True
+        rows_by_key[key] = point_row(wiki_id, record, match, data, tag_filter)
+
+    for record in direct_records:
+        key = record_key(record)
+        match = normalize_linked_id(record['wkid']) == wiki_id
+        if match:
+            is_linked = True
+        rows_by_key[key] = point_row(wiki_id, record, match, data, tag_filter)
+
+    direct_keys = {record_key(record) for record in direct_records}
+    audit_metrics['gold_total'] += len(direct_records)
+    for record in direct_records:
+        key = record_key(record)
+        dist = float(record['dist']) if record['dist'] is not None else 0.0
+        gold_distances.append(dist)
+        if bool(record['direct_within_2500']):
+            audit_metrics['gold_within_2500m'] += 1
+        else:
+            audit_metrics['gold_outside_2500m'] += 1
+        if bool(record['direct_within_threshold']):
+            audit_metrics['gold_within_threshold'] += 1
+            if key not in distance_keys:
+                audit_metrics['dropped_by_limit_count'] += 1
+        else:
+            audit_metrics['gold_outside_threshold'] += 1
+        if key not in rows_by_key:
+            audit_metrics['gold_missing_after_candidate_generation'] += 1
+
+    # A direct row should always be present after the merge. Keep this explicit
+    # so audit output catches future refactors that break gold preservation.
+    missing_after_merge = direct_keys - set(rows_by_key.keys())
+    audit_metrics['gold_missing_after_candidate_generation'] += len(missing_after_merge)
+    return is_linked, list(rows_by_key.values())
+
+
+def write_candidate_generation_audit():
+    distances = sorted(gold_distances)
+    metrics = dict(audit_metrics)
+    if distances:
+        series = pd.Series(distances)
+        metrics.update({
+            'gold_distance_min': float(series.min()),
+            'gold_distance_median': float(series.median()),
+            'gold_distance_p95': float(series.quantile(0.95)),
+            'gold_distance_max': float(series.max()),
+        })
+    else:
+        metrics.update({
+            'gold_distance_min': 0.0,
+            'gold_distance_median': 0.0,
+            'gold_distance_p95': 0.0,
+            'gold_distance_max': 0.0,
+        })
+
+    with open(AUDIT_FILENAME, 'w', encoding='utf-8', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=list(metrics.keys()))
+        writer.writeheader()
+        writer.writerow(metrics)
 
 
 def log_candidate_skip(wiki_id, reason):
@@ -177,7 +319,7 @@ def consume(stop, queue, filename) -> None:
 
 
 async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, single_queue=None, threshold=2500, limit=100, osm_uid_expr="osm_id::text", osm_type_expr="'N'"):
-    direct_link_expr = dbpedia_direct_link_sql() if DATA_SOURCE == 'dbpedia' else "COALESCE(g.wkid, '') = $6"
+    direct_link_expr = direct_link_sql(6)
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
@@ -197,24 +339,37 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
                     OR {direct_link_expr}
                 )
               ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC LIMIT $4"""
+    direct_sql = f"""SELECT osm_id,
+                     {osm_uid_expr} AS osm_uid,
+                     {osm_type_expr} AS osm_type,
+                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
+                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
+                     (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
+                     (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
+                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3) direct_within_threshold,
+                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), 2500) direct_within_2500,
+                     jsonb_strip_nulls(to_jsonb(g)), wkid
+              FROM {VIEW_NAME} g
+              WHERE NOT ST_IsEmpty(way)
+                AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
+              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC"""
 
-    is_linked = False
-    res = []
+    distance_records = []
+    direct_records = []
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("SELECT set_config('statement_timeout', $1, true)", f'{QUERY_TIMEOUT_MS}ms')
                 async for record in conn.cursor(sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, limit, MAX_CANDIDATE_AREA_M2, wiki_id):
-                    match = False
-                    id = normalize_linked_id(record['wkid'])
-                    if id == wiki_id:
-                        is_linked = True
-                        match = True
-                    res.append([wiki_id, record['osm_uid'], record['osm_id'], match, record['dist'], record['bearing_sin'], record['bearing_cos'], record['d_lat'], record['d_lon'], record['bbox_overlap'], filter_tags_concat(record['jsonb_strip_nulls'])] + data)
+                    distance_records.append(record)
+                direct_records = await conn.fetch(direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, wiki_id, linked_value_variants(wiki_id))
     except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as exc:
         log_candidate_skip(wiki_id, f'timeout after {QUERY_TIMEOUT_MS}ms ({type(exc).__name__})')
         return
 
+    is_linked, res = merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, filter_tags_concat)
     enqueue_results(is_linked, res, pair_queue, single_queue)
 
 
@@ -240,7 +395,7 @@ async def fetch_candidates_for_name(pool, wiki_id, name, data, pair_queue, singl
 
 
 async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, single_queue=None, threshold=2500, limit=100, osm_uid_expr="osm_id::text", osm_type_expr="'N'"):
-    direct_link_expr = dbpedia_direct_link_sql() if DATA_SOURCE == 'dbpedia' else "COALESCE(g.wkid, '') = $6"
+    direct_link_expr = direct_link_sql(6)
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
@@ -260,24 +415,37 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
                     OR {direct_link_expr}
                 )
               ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC LIMIT $4"""
+    direct_sql = f"""SELECT osm_id,
+                     {osm_uid_expr} AS osm_uid,
+                     {osm_type_expr} AS osm_type,
+                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
+                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
+                     (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
+                     (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
+                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3) direct_within_threshold,
+                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), 2500) direct_within_2500,
+                     jsonb_strip_nulls(to_jsonb(g)), wkid
+              FROM {VIEW_NAME} g
+              WHERE NOT ST_IsEmpty(way)
+                AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
+              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC"""
 
-    is_linked = False
-    res = []
+    distance_records = []
+    direct_records = []
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute("SELECT set_config('statement_timeout', $1, true)", f'{QUERY_TIMEOUT_MS}ms')
                 async for record in conn.cursor(sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, limit, MAX_CANDIDATE_AREA_M2, wiki_id):
-                    match = False
-                    id = normalize_linked_id(record['wkid'])
-                    if id == wiki_id:
-                        is_linked = True
-                        match = True
-                    res.append([wiki_id, record['osm_uid'], record['osm_id'], match, record['dist'], record['bearing_sin'], record['bearing_cos'], record['d_lat'], record['d_lon'], record['bbox_overlap'], filter_tags_json(record['jsonb_strip_nulls'])] + data)
+                    distance_records.append(record)
+                direct_records = await conn.fetch(direct_sql, f'SRID=4326; {location}', f'SRID=4326; {location}', threshold, wiki_id, linked_value_variants(wiki_id))
     except (asyncio.TimeoutError, asyncpg.exceptions.QueryCanceledError) as exc:
         log_candidate_skip(wiki_id, f'timeout after {QUERY_TIMEOUT_MS}ms ({type(exc).__name__})')
         return
 
+    is_linked, res = merge_direct_gold_rows(wiki_id, distance_records, direct_records, data, filter_tags_json)
     enqueue_results(is_linked, res, pair_queue, single_queue)
 
 
@@ -365,6 +533,7 @@ async def main():
     stop_threads = True
     match_consumer.join()
     single_consumer.join()
+    write_candidate_generation_audit()
 
     with open(LOG_FILENAME, 'a', encoding='utf-8') as file:
         file.write('Stopped consumer threads\n')

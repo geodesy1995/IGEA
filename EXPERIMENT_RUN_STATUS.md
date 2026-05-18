@@ -122,6 +122,10 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 - `ireland_features` includes nodes, ways, and selected relations with geometry.
 - Candidate rows track `osm_uid` so nodes, ways, and relations do not collide on numeric `osm_id`.
 - Candidate text now excludes `wkid`, `confidence`, and `iteration` to avoid label/prediction metadata leakage.
+- Main scientific configs now use `dist_threshold=2500` and `max_candidates=100`; automatic 25 km retry expansion is disabled.
+- Direct OSM `wikipedia`/`wikidata` gold positives are preserved even when they fall outside the 2.5 km ordinary candidate radius or outside the top 100 ordinary candidates.
+- Candidate generation writes `candidate_generation_audit.csv`; the cached runner merges its gold-preservation metrics and split-aware positive support into `candidate_audit.csv`.
+- The cached runner rejects reused common artifacts when their generation audit is missing or their `dist_threshold` / `max_candidates` do not match the current config.
 - `bbox_overlap` uses `ST_Intersects(OSM geometry, KG point)`.
 - Distance, bearing, and coordinate offsets use OSM geometry centroid.
 - Very large polygons are excluded from normal candidate search unless they are directly linked to the KG title.
@@ -134,6 +138,7 @@ Interpretation: this run proved that the enlarged OSM-linked pair pipeline can r
 
 - Wikidata may still be limited by Wikidata Query Service rate limits, but it now has the same OSM-linked path as DBpedia.
 - The previous CPU full DBpedia ablation matrix was manually cancelled after `dbpedia_original_seed42` completed and `dbpedia_original_seed43` had started.
+- The later GPU DBpedia run under `data/ablation_dbpedia_osm_linked_gpu` used the exploratory 10 km / 200-candidate setting and was manually cancelled. Do not use it as the paper main result.
 - GPU TensorFlow is available through Docker. Smoke test result: TensorFlow 2.12.0, `built_with_cuda=True`, `GPU:0` detected on RTX 4060.
 - The current `original`/`all_spatial` smoke scores are leakage-invalid. They should stay in the record only as a pipeline validation run.
 

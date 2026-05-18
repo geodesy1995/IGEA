@@ -1,6 +1,7 @@
 import argparse
 import configparser
 import csv
+import json
 import os
 import shutil
 import subprocess
@@ -8,7 +9,9 @@ import sys
 import time
 from typing import List
 
+import numpy as np
 import pandas as pd
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from experiment_config import SPATIAL_VARIANTS
 from run_ablation_matrix import DEFAULT_VARIANTS, split_csv
@@ -25,6 +28,7 @@ COMMON_FILES = [
     "train pairs.tsv",
     "unmatched pairs.tsv",
     "generate_candidates_log.txt",
+    "candidate_generation_audit.csv",
     "coverage_report.csv",
     "candidate_audit.csv",
 ]
@@ -149,6 +153,105 @@ def copy_common_outputs(common_it_dir: str, variant_it_dir: str) -> None:
             shutil.copy2(src, dst)
 
 
+def read_candidate_generation_audit(common_it_dir: str) -> dict:
+    path = os.path.join(common_it_dir, "candidate_generation_audit.csv")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+    return rows[0] if rows else {}
+
+
+def metric_float(metrics: dict, key: str) -> float:
+    try:
+        return float(metrics.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def labels_from_match_column(values: pd.Series) -> np.ndarray:
+    if values.dtype == bool:
+        return values.astype(np.float32).values
+    return values.astype(str).str.lower().isin(["true", "1", "yes"]).astype(np.float32).values
+
+
+def make_split_indices_for_audit(frame, labels, test_size, random_state, group_column, split_strategy, source_indices=None):
+    if source_indices is None:
+        source_indices = np.arange(len(frame))
+    source_indices = np.asarray(source_indices)
+    source_frame = frame.iloc[source_indices].reset_index(drop=True)
+    source_labels = labels[source_indices]
+
+    use_group_split = (
+        split_strategy == "group"
+        and group_column
+        and group_column in source_frame.columns
+        and source_frame[group_column].nunique(dropna=False) >= 3
+    )
+
+    if use_group_split:
+        groups = source_frame[group_column].fillna("").astype(str).values
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+        train_local, test_local = next(splitter.split(source_frame, source_labels, groups))
+    else:
+        label_counts = pd.Series(source_labels).value_counts()
+        stratify = source_labels if len(label_counts) > 1 and label_counts.min() >= 2 else None
+        train_local, test_local = train_test_split(
+            np.arange(len(source_indices)),
+            test_size=test_size,
+            random_state=random_state,
+            stratify=stratify,
+        )
+
+    return source_indices[train_local], source_indices[test_local], "group" if use_group_split else "row"
+
+
+def positive_support_by_split(train_path: str, config: configparser.ConfigParser) -> dict:
+    if not os.path.exists(train_path):
+        return {}
+
+    split_strategy = config.get("entity linking", "split_strategy", fallback="group").strip().lower()
+    group_column = config.get("entity linking", "split_group_column", fallback="wkid").strip()
+    header = pd.read_csv(train_path, sep="\t", nrows=0)
+    if "match" not in header.columns:
+        return {}
+    usecols = ["match"]
+    if group_column in header.columns:
+        usecols.append(group_column)
+    frame = pd.read_csv(train_path, sep="\t", usecols=usecols)
+    labels = labels_from_match_column(frame["match"])
+    seed_text = config.get("quality gates", "seeds", fallback=config.get("meta", "random_seed", fallback="42"))
+    seeds = [int(seed) for seed in split_csv(seed_text)]
+
+    support = {}
+    for seed in seeds:
+        train_full_idx, test_idx, split_used = make_split_indices_for_audit(
+            frame,
+            labels,
+            0.20,
+            seed,
+            group_column,
+            split_strategy,
+        )
+        train_idx, val_idx, val_split_used = make_split_indices_for_audit(
+            frame,
+            labels,
+            0.10,
+            seed,
+            group_column,
+            split_strategy,
+            train_full_idx,
+        )
+        support[str(seed)] = {
+            "split_strategy": split_used,
+            "val_split_strategy": val_split_used,
+            "train_true": int(np.sum(labels[train_idx] == 1.0)),
+            "val_true": int(np.sum(labels[val_idx] == 1.0)),
+            "test_true": int(np.sum(labels[test_idx] == 1.0)),
+        }
+    return support
+
+
 def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tuple:
     train_path = os.path.join(common_it_dir, "train pairs.tsv")
     audit_path = os.path.join(common_it_dir, "candidate_audit.csv")
@@ -156,16 +259,28 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
     min_train_rows = config.getint("quality gates", "min_train_rows", fallback=2000)
     min_test_true_support = config.getint("quality gates", "min_test_true_support", fallback=20)
     require_nonzero_bbox = config.getboolean("quality gates", "require_nonzero_bbox", fallback=True)
+    expected_dist_threshold = config.getint("candidate generation", "dist_threshold")
+    expected_max_candidates = config.getint("candidate generation", "max_candidates")
+    generation_audit = read_candidate_generation_audit(common_it_dir)
 
     metrics = {
         "train_rows": 0,
         "train_true": 0,
         "train_false": 0,
         "estimated_test_true_support": 0.0,
+        "min_test_true_support_observed": 0,
+        "positive_support_by_split": "{}",
+        "candidate_generation_audit_present": bool(generation_audit),
+        "gold_total": 0,
+        "gold_within_2500m": 0,
+        "gold_outside_2500m": 0,
+        "gold_missing_after_candidate_generation": 0,
+        "dropped_by_limit_count": 0,
         "bbox_nonzero_rows": 0,
         "passed": False,
         "failure_reasons": "",
     }
+    metrics.update(generation_audit)
 
     if os.path.exists(train_path):
         for data in pd.read_csv(train_path, sep="\t", chunksize=50_000):
@@ -180,14 +295,28 @@ def candidate_audit(common_it_dir: str, config: configparser.ConfigParser) -> tu
             if "bbox_overlap" in data.columns:
                 metrics["bbox_nonzero_rows"] += int((pd.to_numeric(data["bbox_overlap"], errors="coerce").fillna(0) != 0).sum())
         metrics["estimated_test_true_support"] = metrics["train_true"] * 0.20
+        split_support = positive_support_by_split(train_path, config)
+        if split_support:
+            test_supports = [entry["test_true"] for entry in split_support.values()]
+            metrics["min_test_true_support_observed"] = min(test_supports)
+            metrics["positive_support_by_split"] = json.dumps(split_support, sort_keys=True)
 
     failures = []
+    if not generation_audit:
+        failures.append("candidate_generation_audit_missing")
+    if generation_audit and metric_float(metrics, "dist_threshold") != float(expected_dist_threshold):
+        failures.append("dist_threshold_mismatch")
+    if generation_audit and metric_float(metrics, "max_candidates") != float(expected_max_candidates):
+        failures.append("max_candidates_mismatch")
     if metrics["train_rows"] < min_train_rows:
         failures.append("train_rows")
     if metrics["train_true"] < min_train_true:
         failures.append("train_true")
-    if metrics["estimated_test_true_support"] < min_test_true_support:
+    support_for_gate = metrics["min_test_true_support_observed"] or metrics["estimated_test_true_support"]
+    if support_for_gate < min_test_true_support:
         failures.append("estimated_test_true_support")
+    if metric_float(metrics, "gold_missing_after_candidate_generation") > 0:
+        failures.append("gold_missing_after_candidate_generation")
     if require_nonzero_bbox and metrics["bbox_nonzero_rows"] == 0:
         failures.append("bbox_overlap")
     metrics["failure_reasons"] = ",".join(failures)
