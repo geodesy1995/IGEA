@@ -19,6 +19,7 @@ BASE_TABLE = config.get('entity linking', 'base_table')
 PREDICTION_TABLE = config.get('entity linking', 'prediction_table')
 VIEW_NAME = config.get('entity linking', 'view_name')
 INDEX_NAME = config.get('entity linking', 'index_name')
+WKID_INDEX_NAME = f"{INDEX_NAME}_wkid_coalesce"
 
 
 with open(PW_FILENAME, 'r', encoding='utf-8') as file:
@@ -54,6 +55,7 @@ async def execute_sql():
     join_expr = "gp.osm_uid = pe.osm_uid" if has_osm_uid else "gp.osm_id = pe.osm_id"
 
     delete_index_sql = f"DROP INDEX IF EXISTS {INDEX_NAME}"
+    delete_wkid_index_sql = f"DROP INDEX IF EXISTS {WKID_INDEX_NAME}"
     delete_view_sql = f"DROP MATERIALIZED VIEW IF EXISTS {VIEW_NAME}"
     create_view_sql = f"""
     CREATE MATERIALIZED VIEW {VIEW_NAME} AS
@@ -69,15 +71,22 @@ async def execute_sql():
         ON {VIEW_NAME}
         USING GIST (way)
     """
+    create_wkid_index_sql = f"""
+    CREATE INDEX {WKID_INDEX_NAME}
+        ON {VIEW_NAME}
+        ((COALESCE(wkid, ''::text)))
+    """
     verification_sql = f"SELECT COUNT(*) FROM {VIEW_NAME}"
     linked_sql = f"SELECT COUNT(*) FROM {VIEW_NAME} WHERE wkid IS NOT NULL"
 
     print('creating direct candidate view')
     async with conn.transaction():
         await conn.execute(delete_index_sql)
+        await conn.execute(delete_wkid_index_sql)
         await conn.execute(delete_view_sql)
         await conn.execute(create_view_sql)
         await conn.execute(create_index_sql)
+        await conn.execute(create_wkid_index_sql)
         count = await conn.fetchval(verification_sql)
         linked_count = await conn.fetchval(linked_sql)
 
