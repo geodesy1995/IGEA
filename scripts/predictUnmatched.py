@@ -226,6 +226,68 @@ def compute_prediction_metrics(data, prediction, prefix):
         f'{prefix}_false_negative': int((y_true & (~y_pred)).sum()),
     }
 
+
+def empty_prediction_metrics(prefix):
+    return {
+        f'{prefix}_precision': 0.0,
+        f'{prefix}_recall': 0.0,
+        f'{prefix}_f1': 0.0,
+        f'{prefix}_support': 0,
+        f'{prefix}_predicted_positive': 0,
+        f'{prefix}_false_positive': 0,
+        f'{prefix}_false_negative': 0,
+    }
+
+
+def write_empty_predictions(reason):
+    print(f'-no candidate pairs to predict: {reason}')
+    all_prediction_pairs = pd.DataFrame(columns=[
+        'wkid',
+        'osm_uid',
+        'osm_id',
+        'probability',
+        'prediction',
+        'prediction_before_verifier',
+        'verifier_selected',
+        'verifier_result',
+        'verifier_confidence',
+        'verifier_reason',
+    ])
+
+    print('-logging predictions for matches')
+    print(f'-to: {OUTPUT_PATH}')
+    with open(OUTPUT_PATH, 'w', encoding='utf-8', newline='') as file:
+        all_prediction_pairs.to_csv(file, sep='\t', index=False)
+    print('-writing complete')
+
+    verifier_stats = {
+        'verifier_selected_count': 0,
+        'verifier_match_count': 0,
+        'verifier_non_match_count': 0,
+        'verifier_unsure_count': 0,
+        'verifier_error_count': 0,
+        'estimated_verifier_cost': 0.0,
+    }
+    write_experiment_metadata(
+        DATA_DIR,
+        config,
+        SPATIAL_FEATURES,
+        verifier_settings=VERIFIER_SETTINGS,
+        extra={
+            'iteration': ITERATION,
+            'prediction_threshold': PREDICTION_THRESHOLD,
+            'predicted_match_count': 0,
+            'candidate_count': 0,
+            **empty_prediction_metrics('prediction_before_verifier'),
+            **empty_prediction_metrics('prediction_after_verifier'),
+            **verifier_stats,
+            'empty_prediction_reason': reason,
+            'spatial_scaler': 'standard_scaler_fit_on_train_split' if USE_SPATIAL_INPUT and os.path.exists(os.path.join(DATA_DIR, SPATIAL_SCALER_FILENAME)) else 'none',
+            'spatial_distance_transform': 'log1p' if 'dist' in SPATIAL_FEATURES else 'none',
+        },
+    )
+    print('-no matches to write to database')
+
 def recall_m(y_true, y_pred):
     true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
     possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
@@ -245,6 +307,9 @@ def f1_m(y_true, y_pred):
 
 if USE_ATTENTION:
     data = pd.read_csv(DATASET_LOCATION, delimiter='\t')
+    if data.empty:
+        write_empty_predictions('unmatched pairs.tsv has no rows')
+        sys.exit(0)
 
     print('-loading classifier')
     print(f'-from: {CLASSIFIER_LOCATION}')
@@ -305,6 +370,9 @@ if USE_ATTENTION:
     prediction_metrics_after = compute_prediction_metrics(data, prediction, 'prediction_after_verifier')
 else:
     data = pd.read_parquet(DATASET_LOCATION, engine='pyarrow')
+    if data.empty:
+        write_empty_predictions('el prediction set.parquet has no rows')
+        sys.exit(0)
 
     print('-loading classifier')
     print(f'-from: {CLASSIFIER_LOCATION}')
