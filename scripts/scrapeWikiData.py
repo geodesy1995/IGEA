@@ -9,6 +9,9 @@ import asyncpg
 import re
 import csv
 import time
+import json
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 DATA_DIR = sys.argv[1]
 CONFIG_PATH = sys.argv[2]
@@ -32,6 +35,8 @@ PG_USER = config.get('postGIS', 'user', fallback='user')
 PG_DB_NAME = config.get('postGIS', 'dbname', fallback='db')
 PG_PORT = config.getint('postGIS', 'port', fallback=5432)
 BASE_TABLE = config.get('entity linking', 'base_table', fallback='')
+COORDINATE_SOURCE = config.get('wikidata scrape', 'coordinate_source', fallback='api' if ENTITY_SOURCE == 'osm_linked' else 'sparql').lower()
+API_BATCH_SIZE = config.getint('wikidata scrape', 'api_batch_size', fallback=50)
 SPARQL_BATCH_SIZE = config.getint('wikidata scrape', 'batch_size', fallback=500)
 PROPERTY_BATCH_SIZE = config.getint('wikidata scrape', 'property_batch_size', fallback=250)
 REQUEST_SLEEP_SECONDS = config.getfloat('wikidata scrape', 'request_sleep_seconds', fallback=0.75)
@@ -48,11 +53,13 @@ endpoint_error_count = 0
 last_request_time = 0.0
 coverage_metrics = {
     'entity_source': ENTITY_SOURCE,
+    'coordinate_source': COORDINATE_SOURCE,
     'scrape_values': ','.join(SCRAPE_MODES),
     'osm_linked_qids': 0,
     'wikidata_coordinate_entities': 0,
     'endpoint_error_count': 0,
     'sparql_batch_size': SPARQL_BATCH_SIZE,
+    'api_batch_size': API_BATCH_SIZE,
     'request_sleep_seconds': REQUEST_SLEEP_SECONDS,
 }
 
@@ -105,6 +112,30 @@ def sparql_query(query: str, context: str):
     return None
 
 
+def api_query(params: dict, context: str):
+    endpoint = 'https://www.wikidata.org/w/api.php'
+    params = {
+        **params,
+        'format': 'json',
+        'formatversion': '2',
+    }
+    url = endpoint + '?' + urlencode(params)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            throttle_request()
+            request = Request(url, headers={'User-Agent': USER_AGENT})
+            with urlopen(request, timeout=config.getint('wikidata scrape', 'timeout_seconds', fallback=120)) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except Exception as exc:
+            if attempt < MAX_RETRIES:
+                sleep_for = RETRY_BACKOFF_SECONDS * attempt
+                print(f'Retrying {context} after {repr(exc)} in {sleep_for:.1f}s')
+                time.sleep(sleep_for)
+            else:
+                record_endpoint_error(context, exc)
+    return None
+
+
 async def collect_osm_wikidata_qids() -> list:
     with open(PW_FILENAME, 'r', encoding='utf-8') as file:
         password = file.read().strip()
@@ -137,6 +168,9 @@ def collect_osm_linked_entities() -> dict:
     coverage_metrics['osm_linked_qids'] = len(qids)
     print(f'-valid OSM-linked qids: {len(qids)}')
 
+    if COORDINATE_SOURCE == 'api':
+        return collect_osm_linked_entities_from_api(qids)
+
     query = """
 PREFIX wd: <http://www.wikidata.org/entity/>
 PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -168,6 +202,62 @@ SELECT ?item ?location (SAMPLE(?type) AS ?type) WHERE {
                     entities[wkid] = {'wkid': wkid, 'location': res['location']['value'], 'type': clazz}
             except Exception as exc:
                 record_endpoint_error(f'processing linked qids {i} - {i + len(batch)}', exc)
+            pbar.update(len(batch))
+            i += len(batch)
+    return entities
+
+
+def claim_value(entity: dict, pid: str):
+    claims = entity.get('claims', {}).get(pid, [])
+    if not claims:
+        return None
+    mainsnak = claims[0].get('mainsnak', {})
+    datavalue = mainsnak.get('datavalue', {})
+    return datavalue.get('value')
+
+
+def collect_osm_linked_entities_from_api(qids: list) -> dict:
+    entities = {}
+    with tqdm(total=len(qids), desc='-Gathering OSM-linked Wikidata entities via API', miniters=1) as pbar:
+        i = 0
+        while i < len(qids):
+            batch = qids[i:min(i + API_BATCH_SIZE, len(qids))]
+            result = api_query(
+                {
+                    'action': 'wbgetentities',
+                    'ids': '|'.join(batch),
+                    'props': 'claims|labels',
+                    'languages': NAME_LANGUAGE,
+                },
+                f'gathering linked qids via API {i} - {i + len(batch)}',
+            )
+            if result is None:
+                pbar.update(len(batch))
+                i += len(batch)
+                continue
+            for qid, entity in result.get('entities', {}).items():
+                if entity.get('missing'):
+                    continue
+                coordinate = claim_value(entity, 'P625')
+                if not coordinate:
+                    continue
+                lat = coordinate.get('latitude')
+                lon = coordinate.get('longitude')
+                if lat is None or lon is None:
+                    continue
+                type_value = claim_value(entity, 'P31') or {}
+                type_qid = type_value.get('id', '') if isinstance(type_value, dict) else ''
+                label = entity.get('labels', {}).get(NAME_LANGUAGE, {}).get('value', '')
+                claim_props = sorted(entity.get('claims', {}).keys())
+                entities[qid] = {
+                    'wkid': qid,
+                    'location': f'Point({lon} {lat})',
+                    'type': type_qid,
+                    'pop': len(claim_props),
+                    'labels': type_qid,
+                    'name': label,
+                    'properties': f"label {label} type {type_qid} claims {' '.join(claim_props)}".strip(),
+                }
             pbar.update(len(batch))
             i += len(batch)
     return entities
@@ -218,7 +308,10 @@ else:
 print(f'-wikidata entities with coordinates: {len(entities)}')
 
 # update popularity
-if 'popularity' in SCRAPE_MODES:
+RUN_SPARQL_ENRICHMENT = not (ENTITY_SOURCE == 'osm_linked' and COORDINATE_SOURCE == 'api')
+
+# update popularity
+if RUN_SPARQL_ENRICHMENT and 'popularity' in SCRAPE_MODES:
     pop_query = """
     PREFIX wd: <http://www.wikidata.org/entity/>
     PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -251,7 +344,7 @@ if 'popularity' in SCRAPE_MODES:
 
 
 # add type labels for entities
-if 'type labels' in SCRAPE_MODES:
+if RUN_SPARQL_ENRICHMENT and 'type labels' in SCRAPE_MODES:
     label_query = """
     PREFIX wd: <http://www.wikidata.org/entity/>
     PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -284,7 +377,7 @@ if 'type labels' in SCRAPE_MODES:
             pbar.update(len(batch))
 
 # add names to entities
-if 'name' in SCRAPE_MODES:
+if RUN_SPARQL_ENRICHMENT and 'name' in SCRAPE_MODES:
     name_query = """
     PREFIX wd: <http://www.wikidata.org/entity/>
     PREFIX wdt: <http://www.wikidata.org/prop/direct/>
@@ -316,7 +409,7 @@ if 'name' in SCRAPE_MODES:
 
 
 # add full properties per entity
-if 'full properties' in SCRAPE_MODES:
+if RUN_SPARQL_ENRICHMENT and 'full properties' in SCRAPE_MODES:
     property_query = """
     PREFIX wd: <http://www.wikidata.org/entity/>
     PREFIX wdt: <http://www.wikidata.org/prop/direct/>
