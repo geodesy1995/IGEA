@@ -1,0 +1,21 @@
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: igea-postgis
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: igea
+      POSTGRES_DB: db
+    ports:
+      - "5432:5432"
+    volumes:
+      - igea_postgis_data:/var/lib/postgresql/data
+      - ./docker/postgis/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d db"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  igea_postgis_data:

@@ -1,6 +1,7 @@
 import os
 import csv
 import sys
+import json
 import configparser
 import asyncio
 import asyncpg
@@ -18,7 +19,7 @@ PG_HOST = config.get('postGIS', 'host')
 PG_USER = config.get('postGIS', 'user')
 PG_DB_NAME = config.get('postGIS', 'dbname')
 PG_PORT = config.getint('postGIS', 'port')
-OUTPUT_FILENAME = os.path.join(DATA_DIR, 'osm_rdf.tsv')
+OUTPUT_FILENAME = os.path.join(DATA_DIR, 'osm rbf.tsv')
 TESTRUN = config.getboolean('misc', 'testrun')
 LIMIT = config.getint('misc', 'limit', fallback=1000)
 BASE_TABLE = config.get('entity linking', 'base_table')
@@ -56,6 +57,42 @@ print('- Starting file writing thread')
 consumer = Thread(target=consume, daemon=True, args=(lambda: stop_threads, queue, OUTPUT_FILENAME))
 consumer.start()
 
+
+def normalize_json_object(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+async def table_has_column(conn, table_name: str, column_name: str) -> bool:
+    return await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = $2
+        )
+        """,
+        table_name,
+        column_name,
+    )
+
+
+def osm_object_path(osm_type: str, osm_id: int) -> str:
+    type_map = {
+        "N": "node",
+        "W": "way",
+        "R": "relation",
+        "node": "node",
+        "way": "way",
+        "relation": "relation",
+    }
+    prefix = type_map.get(str(osm_type), "node")
+    return f"{prefix}/{osm_id}"
+
+
 async def fetch_osm_entities():
     conn = await asyncpg.connect(
         user=PG_USER, 
@@ -64,10 +101,21 @@ async def fetch_osm_entities():
         host=PG_HOST, 
         port=PG_PORT
     )
-    
+    has_osm_uid = await table_has_column(conn, BASE_TABLE, 'osm_uid')
+    has_osm_type = await table_has_column(conn, BASE_TABLE, 'osm_type')
+    osm_uid_expr = "g.osm_uid" if has_osm_uid else "g.osm_id::text"
+    osm_type_expr = "g.osm_type" if has_osm_type else "'N'"
+    join_expr = "g.osm_uid = pe.osm_uid" if has_osm_uid else "g.osm_id = pe.osm_id"
+
     sql = f"""
-    SELECT g.osm_id, ST_X(ST_Transform(way, 4326)) lon, ST_Y(ST_Transform(way, 4326)) lat, jsonb_strip_nulls(to_jsonb(g)), pe.wkid 
-        FROM {BASE_TABLE} g JOIN {PREDICTION_TABLE} pe ON g.osm_id = pe.osm_id
+    SELECT g.osm_id,
+           {osm_uid_expr} AS osm_uid,
+           {osm_type_expr} AS osm_type,
+           ST_X(ST_PointOnSurface(ST_Transform(way, 4326))) lon,
+           ST_Y(ST_PointOnSurface(ST_Transform(way, 4326))) lat,
+           jsonb_strip_nulls(to_jsonb(g)),
+           pe.wkid
+        FROM {BASE_TABLE} g JOIN {PREDICTION_TABLE} pe ON {join_expr}
     """
     
     if TESTRUN:
@@ -79,12 +127,14 @@ async def fetch_osm_entities():
         for row in rows:
             triplets = []
             id = row['osm_id']
+            object_path = osm_object_path(row['osm_type'], id)
             lon = row['lon']
             lat = row['lat']
+            row_data = normalize_json_object(row['jsonb_strip_nulls'])
 
             lat_string = f'"{lat}"^^<http://www.w3.org/2001/XMLSchema#decimal>'
             lon_string = f'"{lon}"^^<http://www.w3.org/2001/XMLSchema#decimal>'
-            id_string = f"<https://www.openstreetmap.org/node/{id}>"
+            id_string = f"<https://www.openstreetmap.org/{object_path}>"
 
             triplets.append([id_string, "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>",
                              "<http://www.w3.org/2003/01/geo/wgs84_pos#SpatialThing>"])
@@ -97,8 +147,8 @@ async def fetch_osm_entities():
 
             valid_pairs = []
 
-            for k, v in row['jsonb_strip_nulls'].items():
-                if k not in ['way', 'osm_id', 'tags']:
+            for k, v in row_data.items():
+                if k not in ['way', 'osm_id', 'osm_uid', 'osm_type', 'tags']:
                     valid_pairs.append((k, str(v)))
                 elif k == 'tags':
                     if v:

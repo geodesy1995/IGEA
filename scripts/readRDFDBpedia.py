@@ -6,9 +6,10 @@ from SPARQLWrapper import SPARQLWrapper, JSON, SPARQLExceptions
 import csv
 import configparser
 from tqdm import tqdm
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import time
 import socket
+from dbpedia_utils import normalize_wikipedia_tag
 
 DATA_DIR = sys.argv[1]
 CONFIG_PATH = sys.argv[2]
@@ -20,8 +21,11 @@ INPUT_FILE = DATA_DIR + 'osm rbf.tsv'
 OUTPUT_FILE = DATA_DIR + 'nca dataset.tsv'
 QID_INDEX_FILE = DATA_DIR + 'qid_index.tsv'
 TESTRUN = config.getboolean('misc', 'testrun')
+LIMIT = config.getint('misc', 'limit', fallback=1000)
 OSM_TAG_FILE = config.get('nca', 'osm_tag_location')
 OSM_KEY_FILE = config.get('nca', 'osm_key_location')
+DBPEDIA_COUNTRY = config.get('dbpedia scrape', 'country')
+DBPEDIA_SOURCE = config.get('dbpedia scrape', 'dbpedia_source', fallback='en')
 REL_THRESHOLD = config.getint('nca',
                               'relevance_threshold')  # minimum number of class instances for class to be considered relevant
 
@@ -63,8 +67,16 @@ for i in range(len(lines)):
     except IndexError:
         print(i)
 for i in range(len(node)):
-    node[i] = node[i].replace('<https://www.openstreetmap.org/node/', '')
-    node[i] = node[i].replace('>', '')
+    subject = node[i].strip('<>')
+    subject = subject.replace('https://www.openstreetmap.org/', '')
+    if subject.startswith('node/'):
+        node[i] = 'N' + subject.split('/', 1)[1]
+    elif subject.startswith('way/'):
+        node[i] = 'W' + subject.split('/', 1)[1]
+    elif subject.startswith('relation/'):
+        node[i] = 'R' + subject.split('/', 1)[1]
+    else:
+        node[i] = subject.replace('>', '')
 for i in range(len(node)):
     key[i] = key[i].replace('<https://wiki.openstreetmap.org/wiki/Key:', '')
     key[i] = key[i].replace('>', '')
@@ -87,8 +99,10 @@ osmtagkey = []
 wikipedia = []
 for index, row in data.iterrows():
     if row['key'] == 'wikipedia':
-        wikipedia.append(row['value'])
-        osmwiki_id.append(row['node'])
+        title, _reason = normalize_wikipedia_tag(row['value'], DBPEDIA_SOURCE)
+        if title:
+            wikipedia.append(f'{DBPEDIA_SOURCE}:{title}')
+            osmwiki_id.append(row['node'])
     if row['tagKey'] in tags:
         osm_id.append(row['node'])
         osmtagkey.append(row['tagKey'])
@@ -100,17 +114,18 @@ osmdata = pd.DataFrame(list(zip(osm_id, osmtagkey)), columns=['osm_id', 'osmTagK
 osmWiki = pd.DataFrame(list(zip(osmwiki_id, wikipedia)), columns=['osm_id', 'wikipedia'])
 osmdata = pd.merge(osmWiki, osmdata, on='osm_id')
 
-dbEnt = list(set(list(data.loc[data['key'] == 'wikipedia', 'value'])))
-for i in range(len(dbEnt)):
-    dbEnt[i] = dbEnt[i].replace('\"', '')
+dbEnt = []
+for value in list(set(list(data.loc[data['key'] == 'wikipedia', 'value']))):
+    title, _reason = normalize_wikipedia_tag(value, DBPEDIA_SOURCE)
+    if title:
+        dbEnt.append(f'{DBPEDIA_SOURCE}:{title}')
 
 
 def get_results(endpoint_url, query):
     user_agent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5)'
     # TODO adjust user agent; see https://w.wiki/CX6
     sparql = SPARQLWrapper(endpoint_url, agent=user_agent)
-    if TESTRUN:
-        sparql.setTimeout(2)
+    sparql.setTimeout(30)
     sparql.setQuery(query)
     sparql.setReturnFormat(JSON)
     return sparql.query().convert()
@@ -132,6 +147,17 @@ for entry in dbEnt:
         entries_per_country.update({language: []})
     if language in ['en', 'de', 'fr']:
         entries_per_country[language].append(entry)
+
+if TESTRUN:
+    remaining = LIMIT
+    for language in sorted(entries_per_country):
+        entries = entries_per_country[language]
+        entries_per_country[language] = entries[:remaining]
+        remaining -= len(entries_per_country[language])
+        if remaining <= 0:
+            break
+    entries_per_country = {language: entries for language, entries in entries_per_country.items() if entries}
+
 language_count = np.sum([len(v) for k, v in entries_per_country.items()])
 print(f'-number of entries with fitting language: {language_count}')
 
@@ -143,9 +169,10 @@ with tqdm(total=language_count, desc='-collecting dbpedia information') as pbar:
         i = 0
         step_size = 30
         while i < len(entries):
+            batch = entries[i:min(i + step_size, len(entries))]
             if language == 'en':
                 endpoint_url = 'http://dbpedia.org/sparql'
-                id_string = ' '.join([f"<http://dbpedia.org/resource/{transform_uri(e)}>" for e in entries[i: min(i+step_size, len(entries) - 1)]])
+                id_string = ' '.join([f"<http://dbpedia.org/resource/{transform_uri(e)}>" for e in batch])
                 query = """PREFIX db: <http://dbpedia.org/resource/>
                 PREFIX prop: <http://dbpedia.org/property/>
                 PREFIX onto: <http://dbpedia.org/ontology/>
@@ -156,7 +183,7 @@ with tqdm(total=language_count, desc='-collecting dbpedia information') as pbar:
                 }""" % id_string
             else:
                 endpoint_url = 'http://%s.dbpedia.org/sparql' % language
-                id_string = ' '.join(f"<http://{language}.dbpedia.org/resource/{transform_uri(e)}>" for e in entries[i: min(i+step_size, len(entries)-1)])
+                id_string = ' '.join(f"<http://{language}.dbpedia.org/resource/{transform_uri(e)}>" for e in batch)
                 query = """PREFIX db: <http://%s.dbpedia.org/resource/>
                 PREFIX prop: <http://%s.dbpedia.org/property/>
                 PREFIX onto: <http://%s.dbpedia.org/ontology/>
@@ -178,15 +205,14 @@ with tqdm(total=language_count, desc='-collecting dbpedia information') as pbar:
             except HTTPError as e:
                 time.sleep(5)
                 pbar.write(f'{i}: {repr(e)}')
-                continue
             except KeyboardInterrupt as e:
                 print(repr(e))
                 break
-            except socket.timeout:
-                pbar.write(f'timeout: {i}')
+            except (socket.timeout, TimeoutError, URLError, OSError) as e:
+                pbar.write(f'timeout: {i}: {repr(e)}')
                 time.sleep(5)
-            pbar.update(min(step_size, len(entries) - i - 1))
-            i += step_size
+            pbar.update(len(batch))
+            i += len(batch)
 
 for i in range(len(wdLabel)):
     try:
@@ -209,7 +235,7 @@ wikiTable = wikiTable[wikiTable['prop'] != 'wikiPageWikiLink']
 wikiTable = wikiTable[wikiTable['prop'] != 'rdf-schema#comment']
 wikiTable = wikiTable[wikiTable['prop'] != 'abstract']
 wikiTable = wikiTable[wikiTable['prop'] != 'rdf-schema#label']
-wikiTable = wikiTable[wikiTable['value'] != 'France']
+wikiTable = wikiTable[wikiTable['value'] != DBPEDIA_COUNTRY]
 wikiTable = wikiTable[~wikiTable.prop.str.startswith('wikiPage')]
 wikiTable = wikiTable[~wikiTable['value'].astype(str).str.match("Q[0-9]+")]
 

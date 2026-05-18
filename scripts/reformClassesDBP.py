@@ -28,6 +28,10 @@ classes = pd.read_csv(CLASS_FILE, delimiter='\t')
 
 print('preparing class filtered entities')
 
+
+def sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
 # Collect all unique QIDs
 print('-gathering dbpedia classes for entity linking')
 async def gather_classes():
@@ -54,7 +58,7 @@ prev = ''
 terms = []
 same_group = set()
 for s in tags:
-    typ, subtype = s.split('=')
+    typ, subtype = s.split('=', 1)
     if typ != prev and same_group:
         is_column = False
         if prev in column_names:
@@ -68,9 +72,9 @@ for s in tags:
         elif is_column:
             terms.append(f"{prev} in ({', '.join(same_group)})")
         else:
-            terms.append(f"tags -> '{prev}' in ({', '.join(same_group)})")
+            terms.append(f"tags -> {sql_literal(prev)} in ({', '.join(same_group)})")
         same_group = set()
-    same_group.add(f"'{subtype}'")
+    same_group.add(sql_literal(subtype))
     prev = typ
 
 is_column = False
@@ -85,18 +89,11 @@ if 'type' in prev:
 elif is_column:
     terms.append(f"{prev} in ({', '.join(same_group)})")
 else:
-    terms.append(f"tags -> '{prev}' in ({', '.join(same_group)})")
+    terms.append(f"tags -> {sql_literal(prev)} in ({', '.join(same_group)})")
 
 delete_index_sql = f"DROP INDEX IF EXISTS {INDEX_NAME}"
 
 delete_sql = f"DROP MATERIALIZED VIEW IF EXISTS {VIEW_NAME}"
-
-sql = f"""
-    CREATE MATERIALIZED VIEW {VIEW_NAME} as
-    SELECT gp.*, pe.wkid 
-    FROM {BASE_TABLE} gp LEFT JOIN {PREDICTION_TABLE} pe ON gp.osm_id = pe.osm_id
-    WHERE 
-""" + '\n or '.join(terms) + " WITH DATA"
 
 index_sql = f"""
 CREATE INDEX {INDEX_NAME} 
@@ -104,6 +101,22 @@ CREATE INDEX {INDEX_NAME}
     USING GIST (way)"""
 
 verification_sql = f"SELECT COUNT(*) FROM {VIEW_NAME}"
+
+
+async def table_has_column(conn, table_name: str, column_name: str) -> bool:
+    return await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = $2
+        )
+        """,
+        table_name,
+        column_name,
+    )
 
 async def execute_sql():
     with open(PW_FILENAME, 'r', encoding='utf-8') as file:
@@ -116,6 +129,15 @@ async def execute_sql():
         host=PG_HOST,
         port=PG_PORT
     )
+
+    has_osm_uid = await table_has_column(conn, BASE_TABLE, 'osm_uid')
+    join_expr = "gp.osm_uid = pe.osm_uid" if has_osm_uid else "gp.osm_id = pe.osm_id"
+    term_clause = f"({' or '.join(terms)}) OR pe.wkid IS NOT NULL" if terms else "pe.wkid IS NOT NULL"
+    sql = f"""
+    CREATE MATERIALIZED VIEW {VIEW_NAME} as
+    SELECT gp.*, pe.wkid
+    FROM {BASE_TABLE} gp LEFT JOIN {PREDICTION_TABLE} pe ON {join_expr}
+    WHERE {term_clause} WITH DATA"""
 
     print(f'-creating view {VIEW_NAME}')
     with open(VIEW_SQL_PATH, 'w', encoding='utf-8', newline='') as file:

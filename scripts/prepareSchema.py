@@ -18,6 +18,7 @@ BASE_TABLE = config.get('entity linking', 'base_table')
 VIEW_NAME = config.get('entity linking', 'view_name')
 INDEX_NAME = config.get('entity linking', 'index_name')
 DATA_SOURCE = config.get('meta', 'kg_source')
+DBPEDIA_SOURCE = config.get('dbpedia scrape', 'dbpedia_source', fallback='en')
 
 print('preparing schema')
 
@@ -32,27 +33,29 @@ sql = f"""
 CREATE TABLE {TABLE_NAME}(
 	id BIGSERIAL,
 	wkid text not null,
+	osm_uid text not null,
+	osm_type text,
 	osm_id BIGINT not null,
 	confidence float not null,
 	iteration int not null
 )
 """
 
-if DATA_SOURCE == 'wikidata':
-    init_sql = f"""
-    INSERT INTO {TABLE_NAME} (wkid, osm_id, confidence, iteration)
-        SELECT tags -> 'wikidata', osm_id, 1.0, 0
-        FROM {BASE_TABLE}
-        WHERE tags -> 'wikidata' is not null
-    """
-else:
-    # DATA_SOURCE == 'dbpedia':
-    init_sql = f"""
-    INSERT INTO {TABLE_NAME} (wkid, osm_id, confidence, iteration)
-        SELECT tags -> 'wikipedia', osm_id, 1.0, 0
-        FROM {BASE_TABLE}
-        WHERE tags -> 'wikipedia' is not null
-    """
+
+async def table_has_column(conn, table_name: str, column_name: str) -> bool:
+    return await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = $2
+        )
+        """,
+        table_name,
+        column_name,
+    )
 
 async def execute_sql():
     conn = await asyncpg.connect(
@@ -63,8 +66,33 @@ async def execute_sql():
         port=PG_PORT
     )
 
+    has_osm_uid = await table_has_column(conn, BASE_TABLE, 'osm_uid')
+    has_osm_type = await table_has_column(conn, BASE_TABLE, 'osm_type')
+
+    osm_uid_expr = "osm_uid" if has_osm_uid else "osm_id::text"
+    osm_type_expr = "osm_type" if has_osm_type else "'N'"
+
+    if DATA_SOURCE == 'wikidata':
+        init_sql = f"""
+        INSERT INTO {TABLE_NAME} (wkid, osm_uid, osm_type, osm_id, confidence, iteration)
+            SELECT tags -> 'wikidata', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
+            FROM {BASE_TABLE}
+            WHERE tags -> 'wikidata' is not null
+        """
+    else:
+        init_sql = f"""
+        INSERT INTO {TABLE_NAME} (wkid, osm_uid, osm_type, osm_id, confidence, iteration)
+            SELECT tags -> 'wikipedia', {osm_uid_expr}, {osm_type_expr}, osm_id, 1.0, 0
+            FROM {BASE_TABLE}
+            WHERE tags -> 'wikipedia' is not null
+              AND (
+                  lower(tags -> 'wikipedia') LIKE '{DBPEDIA_SOURCE}:%'
+                  OR lower(tags -> 'wikipedia') LIKE 'http://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
+                  OR lower(tags -> 'wikipedia') LIKE 'https://{DBPEDIA_SOURCE}.wikipedia.org/wiki/%'
+              )
+        """
+
     async with conn.transaction():
-        cur = conn.cursor()
         print('-deleting old view')
         await conn.execute(delete_index_sql)
         await conn.execute(delete_view)

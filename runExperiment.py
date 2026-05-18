@@ -2,6 +2,7 @@ import os
 import time
 import sys
 import configparser
+import subprocess
 
 if len(sys.argv) >= 2:
     CONFIG_PATH = sys.argv[1]
@@ -36,7 +37,12 @@ if TESTRUN:
     ---------------- STARTING TESTRUN ----------------
     """)
 
-os.system(f"python ./scripts/prepareSchema.py \"{CONFIG_PATH}\"")
+def run_step(script_path, *args):
+    command = [sys.executable, script_path, *args]
+    subprocess.run(command, check=True)
+
+
+run_step('./scripts/prepareSchema.py', CONFIG_PATH)
 for iteration in range(1, NUM_ITERATIONS + 1):
     print(f"""
     ==================================
@@ -45,47 +51,47 @@ for iteration in range(1, NUM_ITERATIONS + 1):
     """)
     it_folder = DATA_FOLDER + f'it_{iteration}/'
     os.makedirs(it_folder, exist_ok=True)
-    os.system(f"python ./scripts/osm2rdf.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+    run_step('./scripts/osm2rdf.py', it_folder, CONFIG_PATH)
 
     # read kg data for osm linked entities
     if DATA_SOURCE == 'wikidata':
-        os.system(f"python ./scripts/readRDFWikidata.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+        run_step('./scripts/readRDFWikidata.py', it_folder, CONFIG_PATH)
     else:
         # DATA_SOURCE == 'dbpedia'
-        os.system(f"python ./scripts/readRDFDBpedia.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+        run_step('./scripts/readRDFDBpedia.py', it_folder, CONFIG_PATH)
 
     # train class matchings for classes in osm and kg
-    os.system(f"python ./scripts/schemaMatch.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+    run_step('./scripts/schemaMatch.py', it_folder, CONFIG_PATH)
 
     # read data for all entities of predicted kg class matches
     if DATA_SOURCE == 'wikidata':
-        os.system(f"python ./scripts/reformClasses.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-        os.system(f"python ./scripts/scrapeWikiData.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+        run_step('./scripts/reformClasses.py', it_folder, CONFIG_PATH)
+        run_step('./scripts/scrapeWikiData.py', it_folder, CONFIG_PATH)
     else:
         # DATA_SOURCE == 'dbpedia'
-        os.system(f"python ./scripts/reformClassesDBP.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-        os.system(f"python ./scripts/scrapeDBPedia.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+        run_step('./scripts/reformClassesDBP.py', it_folder, CONFIG_PATH)
+        run_step('./scripts/scrapeDBPedia.py', it_folder, CONFIG_PATH)
 
     # generate fitting osm candidate pairs
-    os.system(f"python ./scripts/candidateGeneration.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+    run_step('./scripts/candidateGeneration.py', it_folder, CONFIG_PATH)
 
     if not USE_LEGACY_EMBEDDINGS:
         # embed unstructured text information and train classifier
         if USE_ATTENTION:
-            os.system(f"python ./scripts/entityLinkingAttention.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+            run_step('./scripts/entityLinkingAttention.py', it_folder, CONFIG_PATH)
         else:
-            os.system(f"python ./scripts/computeFTEmbeddings.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-            os.system(f"python ./scripts/entityLinking.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+            run_step('./scripts/computeFTEmbeddings.py', it_folder, CONFIG_PATH)
+            run_step('./scripts/entityLinking.py', it_folder, CONFIG_PATH)
 
         # predict unknown matches for next iteration
-        os.system(f"python ./scripts/predictUnmatched.py \"{it_folder}\" \"{CONFIG_PATH}\" {iteration}")
+        run_step('./scripts/predictUnmatched.py', it_folder, CONFIG_PATH, str(iteration))
 
     else:
         # run tests using custom trained embeddings
-        os.system(f"python ./scripts/legacyEmbeddings/transformForKV.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-        os.system(f"python ./scripts/legacyEmbeddings/embeddingKeyValue.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-        os.system(f"python ./scripts/legacyEmbeddings/prepareTrainingFromKV.py \"{it_folder}\" \"{CONFIG_PATH}\"")
-        os.system(f"python ./scripts/entityLinking.py \"{it_folder}\" \"{CONFIG_PATH}\"")
+        run_step('./scripts/legacyEmbeddings/transformForKV.py', it_folder, CONFIG_PATH)
+        run_step('./scripts/legacyEmbeddings/embeddingKeyValue.py', it_folder, CONFIG_PATH)
+        run_step('./scripts/legacyEmbeddings/prepareTrainingFromKV.py', it_folder, CONFIG_PATH)
+        run_step('./scripts/entityLinking.py', it_folder, CONFIG_PATH)
         if NUM_ITERATIONS > 1:
             print('Breaking after one iteration')
             print('Legacy embeddings are not used in multiple iteration strategy')

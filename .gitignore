@@ -1,0 +1,16 @@
+/venv/
+__pycache__/
+*.pyc
+config/pw.txt
+.env
+*.env
+config/osmTagKeyWiki.csv
+config/osmKeyWiki.csv
+config/osmTagKeyWiki.stats.json
+data/
+models/
+*.osm.pbf
+*.osm.pbf.md5
+*.bin
+*.gz
+ablation_summary.csv

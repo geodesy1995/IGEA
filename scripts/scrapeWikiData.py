@@ -39,7 +39,7 @@ PREFIX wd: <http://www.wikidata.org/entity/>
 PREFIX wdt: <http://www.wikidata.org/prop/direct/>
 
 SELECT ?item ?type ?location WHERE {
-    ?item wdt:P17 wd:%s. # in Germany
+    ?item wdt:P17 wd:%s.
     ?item wdt:P31* wd:%s. # instance or subinstance of (to be specified)
     ?item wdt:P625 ?location.
     FILTER (strstarts(str(?location), 'Point'))
@@ -57,8 +57,8 @@ with tqdm(total=len(linked_classes), desc=f'-Gathering entities in ({COUNTRY_ID}
             for res in results['results']['bindings']:
                 wkid = res['item']['value'].split('/')[-1]
                 entities.update({wkid: {'wkid': wkid, 'location': res['location']['value'], 'type': clazz}})
-        except:
-            pbar.write(f'An error occurred gathering {clazz}, skipping...')
+        except Exception as exc:
+            pbar.write(f'An error occurred gathering {clazz}: {repr(exc)}')
         pbar.update(1)
         if TESTRUN:
             if len(entities) > LIMIT:
@@ -204,8 +204,8 @@ if 'full properties' in SCRAPE_MODES:
                     property_pairs.add(f"{res['wdLabel']['value']} {res['ps_Label']['value']}")
                     cur_id = wkid
                 entities[cur_id].update({'properties': ' '.join(property_pairs)})
-            except:
-                pbar.write(f'An error occurred gathering {i} - {i + step_size}, skipping...')
+            except Exception as exc:
+                pbar.write(f'An error occurred gathering {i} - {i + step_size}: {repr(exc)}')
             i += step_size
             pbar.update(step_size)
 
