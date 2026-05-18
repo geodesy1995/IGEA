@@ -57,6 +57,7 @@ if TESTRUN:
 audit_metrics = {
     'dist_threshold': DIST_THRESHOLD,
     'max_candidates': MAX_CANDIDATES,
+    'distance_metric': 'geography_meters',
     'gold_total': 0,
     'gold_within_2500m': 0,
     'gold_outside_2500m': 0,
@@ -323,38 +324,39 @@ async def fetch_candidates_for_point(pool, wiki_id, location, data, pair_queue, 
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
-                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
-                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
-                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     ST_Distance(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     COALESCE(sin(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_cos,
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
                      jsonb_strip_nulls(to_jsonb(g)), wkid
               FROM {VIEW_NAME} g
-              WHERE ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3)
+              WHERE way && ST_Expand(ST_Transform(ST_GeomFromEWKT($2), 3857), $3::double precision * 2.5)
+                AND ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3)
                 AND NOT ST_IsEmpty(way)
                 AND (
                     $5 <= 0
                     OR COALESCE(ST_Area(way), 0) <= $5
                     OR {direct_link_expr}
                 )
-              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC LIMIT $4"""
+              ORDER BY dist ASC LIMIT $4"""
     direct_sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
-                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
-                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
-                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     ST_Distance(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     COALESCE(sin(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_cos,
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
-                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3) direct_within_threshold,
-                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), 2500) direct_within_2500,
+                     ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) direct_within_threshold,
+                     ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, 2500) direct_within_2500,
                      jsonb_strip_nulls(to_jsonb(g)), wkid
               FROM {VIEW_NAME} g
               WHERE NOT ST_IsEmpty(way)
                 AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
-              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC"""
+              ORDER BY dist ASC"""
 
     distance_records = []
     direct_records = []
@@ -399,38 +401,39 @@ async def fetch_candidates_legacy(pool, wiki_id, location, data, pair_queue, sin
     sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
-                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
-                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
-                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     ST_Distance(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     COALESCE(sin(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_cos,
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
                      jsonb_strip_nulls(to_jsonb(g)), wkid
               FROM {VIEW_NAME} g
-              WHERE ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3)
+              WHERE way && ST_Expand(ST_Transform(ST_GeomFromEWKT($2), 3857), $3::double precision * 2.5)
+                AND ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3)
                 AND NOT ST_IsEmpty(way)
                 AND (
                     $5 <= 0
                     OR COALESCE(ST_Area(way), 0) <= $5
                     OR {direct_link_expr}
                 )
-              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC LIMIT $4"""
+              ORDER BY dist ASC LIMIT $4"""
     direct_sql = f"""SELECT osm_id,
                      {osm_uid_expr} AS osm_uid,
                      {osm_type_expr} AS osm_type,
-                     ST_DISTANCE(way, ST_Transform(ST_GeomFromEWKT($1), 3857)) dist,
-                     COALESCE(sin(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_sin,
-                     COALESCE(cos(ST_Azimuth(ST_Transform(ST_GeomFromEWKT($1), 3857), ST_Centroid(way))), 0) bearing_cos,
+                     ST_Distance(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($1)::geography) dist,
+                     COALESCE(sin(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_sin,
+                     COALESCE(cos(ST_Azimuth(ST_GeomFromEWKT($1)::geography, ST_Transform(ST_Centroid(way), 4326)::geography)), 0) bearing_cos,
                      (ST_Y(ST_Transform(ST_Centroid(way), 4326)) - ST_Y(ST_GeomFromEWKT($1))) d_lat,
                      (ST_X(ST_Transform(ST_Centroid(way), 4326)) - ST_X(ST_GeomFromEWKT($1))) d_lon,
                      (ST_Intersects(way, ST_Transform(ST_GeomFromEWKT($1), 3857)))::int bbox_overlap,
-                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), $3) direct_within_threshold,
-                     ST_DWithin(way, ST_Transform(ST_GeomFromEWKT($2), 3857), 2500) direct_within_2500,
+                     ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, $3) direct_within_threshold,
+                     ST_DWithin(ST_Transform(way, 4326)::geography, ST_GeomFromEWKT($2)::geography, 2500) direct_within_2500,
                      jsonb_strip_nulls(to_jsonb(g)), wkid
               FROM {VIEW_NAME} g
               WHERE NOT ST_IsEmpty(way)
                 AND ({direct_link_sql(4)} OR {direct_link_exact_sql(5)})
-              ORDER BY way <-> ST_Transform(ST_GeomFromEWKT($2), 3857), dist ASC"""
+              ORDER BY dist ASC"""
 
     distance_records = []
     direct_records = []
