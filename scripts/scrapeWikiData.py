@@ -37,10 +37,11 @@ PROPERTY_BATCH_SIZE = config.getint('wikidata scrape', 'property_batch_size', fa
 REQUEST_SLEEP_SECONDS = config.getfloat('wikidata scrape', 'request_sleep_seconds', fallback=0.75)
 MAX_RETRIES = config.getint('wikidata scrape', 'max_retries', fallback=4)
 RETRY_BACKOFF_SECONDS = config.getfloat('wikidata scrape', 'retry_backoff_seconds', fallback=10.0)
+USER_AGENT = config.get('wikidata scrape', 'user_agent', fallback='IGEA-UrbanAI/0.1 (https://github.com/geodesy1995/IGEA; research experiment)')
 
 sparql = SPARQLWrapper("https://query.wikidata.org/sparql",
                        returnFormat='json',
-                       agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5)')
+                       agent=USER_AGENT)
 sparql.setTimeout(config.getint('wikidata scrape', 'timeout_seconds', fallback=120))
 
 endpoint_error_count = 0
@@ -134,6 +135,7 @@ def collect_osm_linked_entities() -> dict:
     if TESTRUN:
         qids = qids[:LIMIT]
     coverage_metrics['osm_linked_qids'] = len(qids)
+    print(f'-valid OSM-linked qids: {len(qids)}')
 
     query = """
 PREFIX wd: <http://www.wikidata.org/entity/>
@@ -213,6 +215,7 @@ if ENTITY_SOURCE == 'osm_linked':
 else:
     print('-entity source: Wikidata country/class query')
     entities = collect_country_entities()
+print(f'-wikidata entities with coordinates: {len(entities)}')
 
 # update popularity
 if 'popularity' in SCRAPE_MODES:
